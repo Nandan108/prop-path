@@ -1,0 +1,40 @@
+{
+  "name": "nandan108/prop-path",
+  "description": "A composable, JSONPath-inspired query engine for deep property access in PHP",
+  "type": "library",
+  "license": "MIT",
+  "autoload": {
+    "psr-4": {
+      "Nandan108\\PropPath\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Nandan108\\PropPath\\Tests\\": "tests/"
+    }
+  },
+  "authors": [
+    {
+      "name": "Samuel de Rougemont",
+      "email": "nandan108@gmail.com"
+    }
+  ],
+  "require": {
+    "php": "^8.1",
+    "nandan108/prop-access": "^0.1.0"
+  },
+  "require-dev": {
+    "friendsofphp/php-cs-fixer": "^3.75",
+    "phpunit/phpunit": "^10.0",
+    "vimeo/psalm": "^6.10",
+    "nunomaduro/collision": "^8.5"
+  },
+  "scripts": {
+    "cs-fix": "./vendor/bin/php-cs-fixer fix --allow-risky=yes --diff",
+    "psalm": "./vendor/bin/psalm",
+    "test": "./vendor/bin/phpunit",
+    "testAndCover": "./vendor/bin/phpunit --coverage-text --coverage-html coverage"
+  },
+  "minimum-stability": "dev",
+  "prefer-stable": true
+}
