@@ -10,6 +10,16 @@ use Nandan108\PropPath\Support\TokenType;
 final class Parser
 {
     /**
+     * Grammar:
+     *  chain = [path, '=>'] path ('??' [path, '=>'] path)*
+     *  rootChain = path ('??' path)*
+     *  path = [root] (braket | '.' segment)+
+     *  root = '$' [identifier] '.'
+     *  bracket = '[' chain (',' chain)* ']'
+     *  segment = ['!' | '!!' | '?'] ['@'] (identifier | integer | literal | bracket | slice | '~' | '*' | '**')
+     */
+
+    /**
      * Parses a fallback chain of paths, separated by `??`.
      *
      * @return array<Seg\ParsedPath|Seg\ParsedLiteral> an array of paths, each with segments and an optional key
@@ -19,7 +29,12 @@ final class Parser
         $paths = [];
 
         while (!$ts->eof()) {
-            $paths[] = $path = self::parseSinglePath($ts, $context, $inBraket);
+            $path = self::parseSinglePath($ts, $context, $inBraket);
+            if ($ts->consume([TokenType::Arrow])) {
+                $customKey = $path instanceof Seg\ParsedLiteral ? (string) $path->value : $path;
+                $path = self::parseSinglePath($ts, $context, $inBraket, $customKey);
+            }
+            $paths[] = $path;
 
             // After parsing a path, if we don't find a `??`, it's the end of the chain.
             if ($path instanceof Seg\ParsedLiteral || !$ts->consume([TokenType::DblQstn])) {
@@ -33,24 +48,16 @@ final class Parser
     /**
      * Parses a single path (sequence of segments), terminated by `??`, `,`, or `]`.
      */
-    private static function parseSinglePath(TokenStream $ts, ExtractContext $context, bool $inBracket): Seg\ParsedPath|Seg\ParsedLiteral
+    private static function parseSinglePath(TokenStream $ts, ExtractContext $context, bool $inBracket, Seg\ParsedPath|string|null $customKey = null): Seg\ParsedPath|Seg\ParsedLiteral
     {
         $segments = [];
 
         $i = $ts->getIndex();
         $getRaw = fn (): string => $ts->valueSince($i);
 
-        if ($customKeyToken = $ts->consume([
-            [TokenType::Identifier, TokenType::Integer, TokenType::String],
-            TokenType::Arrow,
-        ])[0] ?? null) {
-            // if the first token is an identifier followed by '=>', it's a key for the path
-            $customKey = $customKeyToken->value;
-        }
-
         // A path may be composed of a single integer or literal string value, in which case this is the
         // value that will be used.
-        if ($token = $ts->consume([[TokenType::String, TokenType::Integer]])[0] ?? null) {
+        if ($token = $ts->consume([TokenType::String])[0] ?? null) {
             $literal = TokenType::String === $token->type ? $token->value : (int) $token->value;
 
             return new Seg\ParsedLiteral($literal, $customKey ?? null);
@@ -88,7 +95,7 @@ final class Parser
                 }
             }
 
-            if ($ts->peekIsOneOf(TokenType::DblQstn, TokenType::Comma, TokenType::BracketClose)) {
+            if ($ts->peekIsOneOf(TokenType::DblQstn, TokenType::Comma, TokenType::BracketClose, TokenType::Arrow)) {
                 break;
             }
 
@@ -171,6 +178,16 @@ final class Parser
             return $newSlice(null, null);
         }
 
+        if ($ts->consume([TokenType::Tilde])) {
+            $flattenThrowMode = match ($mode) {
+                ThrowMode::MISSING_KEY => ThrowMode::NOT_A_CONTAINER,
+                ThrowMode::NULL_VALUE  => ThrowMode::NOT_CONTAINING_CONTAINERS,
+                default                => ThrowMode::NEVER,
+            };
+
+            return new Seg\ParsedFlatten($flattenThrowMode, $getRaw(), preserveKeys: $preserveKey);
+        }
+
         // if we reach here, it means we have an invalid segment
         // The ending ?? new Seg\ParsedKey('') will never be reached, but it is here to quiet intelephense,
         // and as a one-liner to avoid a non-coverable sad path.
@@ -191,18 +208,13 @@ final class Parser
         while (!$ts->eof()) {
             $chains[] = self::parseChain($ts, $context, true);
 
-            // skip comma
-            if ($ts->consume([TokenType::Comma])) {
-                continue;
-            }
-
-            // skip ']'
+            // if we find a closing bracket, that's the end of the bracket expression
             if ($ts->consume([TokenType::BracketClose])) {
                 break;
             }
 
-            $token = json_encode($ts->peek()->value);
-            $context->failParse($ts, "Unexpected token $token in bracket expression", 1);
+            // consume the natural separator within bracket.
+            $ts->consume([TokenType::Comma]);
         }
 
         $chains or $context->failParse($ts, 'invalid empty bracket expression');

@@ -14,6 +14,8 @@ use Nandan108\PropPath\Support\ThrowMode;
  */
 final class PropPath
 {
+    public static array $cache = [];
+
     public static function boot(): void
     {
         static $booted = false;
@@ -23,6 +25,11 @@ final class PropPath
 
             $booted = true;
         }
+    }
+
+    public static function clearCache(): void
+    {
+        self::$cache = [];
     }
 
     /**
@@ -36,21 +43,12 @@ final class PropPath
         ?callable $failParseWith = null,
         ThrowMode $defaultThrowMode = ThrowMode::NEVER,
         bool $ignoreCache = false,
+        bool $forceCacheRefresh = false,
     ): \Closure {
-        if (is_array($paths)) {
-            $jsonPaths = json_encode($paths);
-            if (false === $jsonPaths) {
-                throw new \InvalidArgumentException('Failed to serialize $paths to JSON.');
-            }
-        } else {
-            $jsonPaths = $paths;
-        }
+        $cacheKey = $defaultThrowMode->value.':'.(is_array($paths) ? hash('xxh3', serialize($paths)) : $paths);
 
-        static $cache = [];
-        $cacheKey = $defaultThrowMode->value.':'.$jsonPaths;
-
-        if (!$ignoreCache && isset($cache[$cacheKey])) {
-            return $cache[$cacheKey];
+        if (!$ignoreCache && !$forceCacheRefresh && isset(self::$cache[$cacheKey])) {
+            return self::$cache[$cacheKey];
         }
 
         self::boot();
@@ -58,7 +56,6 @@ final class PropPath
         // Compile just the path structure
         ['context' => $context, 'extractor' => $extractor] = Compiler::compile(
             $paths,
-            $jsonPaths,
             $failParseWith,
             $defaultThrowMode
         );
@@ -74,6 +71,11 @@ final class PropPath
             return $extractor($roots);
         };
 
-        return $cache[$cacheKey] = $extractor;
+        if (!$ignoreCache) {
+            // Cache the compiled extractor
+            self::$cache[$cacheKey] = $extractor;
+        }
+
+        return $extractor;
     }
 }

@@ -7,5 +7,6 @@ final class ParsedRoot extends ParsedSegment
     public function __construct(
         public ?string $key,
     ) {
+        $this->raw = '$'.($key ?? '');
     }
 }

@@ -151,6 +151,7 @@ final class TokenStream
                 '['     => new Token(TokenType::BracketOpen),
                 ']'     => new Token(TokenType::BracketClose),
                 '.'     => new Token(TokenType::Dot),
+                '~'     => new Token(TokenType::Tilde),
                 default => null,
             };
             if ($token) {

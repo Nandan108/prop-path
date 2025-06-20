@@ -12,7 +12,7 @@ final class ParsedPath
      **/
     public function __construct(
         public array $segments,
-        public ?string $key,
+        public ParsedPath|int|string|null $key,
         /** @psalm-suppress PossiblyUnusedProperty */
         string $raw,
     ) {

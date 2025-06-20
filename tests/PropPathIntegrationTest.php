@@ -96,8 +96,13 @@ final class PropPathIntegrationTest extends TestCase
                 ],
             ],
             'dto' => [
-                'foo' => ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
-                'bar' => 'we',
+                'foo'  => ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+                'bar'  => 'we',
+                'book' => [
+                    ['isbn' => '916-x', 'title' => 'B.One'],
+                    ['isbn' => '923-x', 'title' => 'B.Two'],
+                    ['isbn' => '912-x', 'title' => 'B.Three'],
+                ],
             ],
             'doop' => [
                 'baz' => 'yes',
@@ -137,6 +142,9 @@ final class PropPathIntegrationTest extends TestCase
 
     public function testGrabAllWithStars(): void
     {
+        PropPath::clearCache();
+        $this->assertEquals(count(PropPath::$cache), 0);
+
         // single stars
         $this->assertEquals(
             ['bar' => 'no', 'baz' => 'yes', 'zab' => ['nab' => ['baz' => 'can'], 'bar' => 'we']],
@@ -148,6 +156,10 @@ final class PropPathIntegrationTest extends TestCase
             ['bar' => 'we', 'baz' => 'can', 'zab' => ['nab' => ['baz' => 'can'], 'bar' => 'we'], 'nab' => ['baz' => 'can']],
             $this->extract('$doop.@**')
         );
+
+        $this->assertEquals(count(PropPath::$cache), 2);
+        PropPath::clearCache();
+        $this->assertEquals(count(PropPath::$cache), 0);
     }
 
     public function testTokenization(): void
@@ -193,6 +205,70 @@ final class PropPathIntegrationTest extends TestCase
         );
     }
 
+    public function testItResolvesDynamicKeyAfterStarAndFlatten(): void
+    {
+        // extract all book (standard path $dto.book, nothing special here)
+        $this->assertEquals(
+            [
+                ['isbn' => '916-x', 'title' => 'B.One'],
+                ['isbn' => '923-x', 'title' => 'B.Two'],
+                ['isbn' => '912-x', 'title' => 'B.Three'],
+            ],
+            $this->extract('$dto.book')
+        );
+
+        // for each book, extract isbn
+        $this->assertEquals(['916-x', '923-x', '912-x'],
+            $this->extract('$dto.book*isbn')
+        );
+
+        // for each book, extract [isbn => title]
+        $this->assertEquals(
+            [['916-x' => 'B.One'], ['923-x' => 'B.Two'], ['912-x' => 'B.Three']],
+            $this->extract('$dto.book*[isbn => title]')
+        );
+
+        // '$dto.book*[isbn => title]~' means "in $dto.book, for each item: [make array [isbn => title] then flatten]"
+        // because * consumes all the segments following it in the same path, and applies them
+        // to each item it finds in the array at its own level (children of $dto.book node in this case).
+        // flattening ['916-x' => 'B.One'] yields ['916-x' => 'B.One'], si here '~' makes no change.
+        $this->assertEquals(
+            [['916-x' => 'B.One'], ['923-x' => 'B.Two'], ['912-x' => 'B.Three']],
+            $this->extract('$dto.book*[isbn => title]@~')
+        );
+
+        // However if we wrap the * and following segment to prevent * from consuming the rest of the path,
+        // we get a more useful result:
+        // in $dto.book, [for each item, make array [isbn => title]], then flatten (not preserving keys)
+        $this->assertEquals(
+            ['B.One', 'B.Two', 'B.Three'],
+            $this->extract('$dto.book[*[isbn => title]]~')
+        );
+
+        // in $dto.book, [for each item, make array [isbn => title]], then @flatten (preserving keys)
+        $this->assertEquals(
+            ['916-x' => 'B.One', '923-x' => 'B.Two', '912-x' => 'B.Three'],
+            $this->extract('$dto.book[*[isbn => title]]@~')
+        );
+    }
+
+    public function testItCanFlattenObjects(): void
+    {
+        $this->roots['foo'] = (object) [
+            'bar' => ['a' => 1, 'b' => 20],
+            'baz' => ['a' => 10, 'b' => 2],
+        ];
+        $this->assertEquals(
+            ['isNull' => null, 'can' => 'no', 'bar' => 'yes', 'x' => 'y', 'zap' => null],
+            $this->extract('foo@~')
+        );
+
+        $this->assertEquals(
+            ['man', 'y', null, 5, null, 'yes', 'no'],
+            $this->extract('foo~')
+        );
+    }
+
     public function testItResolvesArraySlicing(): void
     {
         $list = $this->roots['dto']['foo'];
@@ -211,22 +287,25 @@ final class PropPathIntegrationTest extends TestCase
     {
         $this->assertEquals([['x' => 5, 'y' => 6], null], $this->extract('quux.2:4'));
 
+        // slicing a non-sliceable in ThrowMode=NEVER, should return null
+        $this->assertEquals(null, $this->extract('bar.2:5'));
+
         $this->assertThrows(
             fn () => $this->assertEquals([['x' => 5, 'y' => 6], null], $this->extract('quux.!2:5')),
             EvaluationError::class,
-            'Path segment $value.quux.`2:5` slice is missing some keys: expected 3 but got 2.'
+            'Path segment $value.`quux` slice `2:5` is missing some keys: expected 3 but got 2.'
         );
 
         $this->assertThrows(
             fn () => $this->assertEquals([['x' => 5, 'y' => 6], null], $this->extract('quux.!2:5')),
             EvaluationError::class,
-            'Path segment $value.quux.`2:5` slice is missing some keys: expected 3 but got 2.'
+            'Path segment $value.`quux` slice `2:5` is missing some keys: expected 3 but got 2.'
         );
 
         $this->assertThrows(
             fn () => $this->assertEquals([['x' => 5, 'y' => 6], null], $this->extract('qux.bar.!2:4')),
             EvaluationError::class,
-            'Path segment $value.qux.bar.`2:4` cannot be sliced: string is not an array or ArrayAccess.'
+            'Path segment $value.qux.`bar` cannot be sliced: string is not an array or ArrayAccess.'
         );
     }
 
@@ -253,20 +332,18 @@ final class PropPathIntegrationTest extends TestCase
 
     public function testItFailsWithCorrectErrorMessagesInComplexPaths(): void
     {
-        $this->assertThrows(
-            fn () => $this->assertEquals(
-                ['yes', 'asdf' => 'we', [['x' => 5, 'y' => 6], null]],
-                $this->extract('[foo.zab.bar, asdf => qux.bar, quux.!!2:4]')
-            ),
-            EvaluationError::class,
-            'Path segment $value.quux.`2:4` slice contains a null value at key `1`.'
+        // This is a complex path that combines various features, including bracket, null coalescing, a dynamic custom key and a slice.
+        $this->assertEquals(
+            ['zab' => 'yes', 'we' => 'can', 'quux' => [['x' => 5, 'y' => 6], null]],
+            $this->extract('@[foo.@zab.bar, notThere ?? $dto.bar => qux.bar, quux.!2:4]')
         );
 
-        // $this->assertThrows(
-        //     fn (): mixed => $this->extract('quux.!2:4'),
-        //     SyntaxError::class,
-        //     'Slice step cannot be negative'
-        // );
+        $this->assertThrows(
+            fn (): mixed => $this->extract('[foo.zab.bar, $dto.bar => qux.bar, quux.!!2:4]'),
+            EvaluationError::class,
+            // SyntaxError::class,
+            'Path segment $value.`quux` slice `2:4` contains a null value at key `1`.'
+        );
     }
 
     public function testItResolvesStructures(): void
@@ -309,7 +386,10 @@ final class PropPathIntegrationTest extends TestCase
 
     public function testItResolvesBasicChain(): void
     {
-        $this->assertEquals('no', $this->extract('missing ?? boo'));
+        // chain falls back all way to null
+        $this->assertEquals(null, $this->extract('missing ?? anotherMissing ?? notThere ?? unknownKey'));
+        // falls back to boo = 'no;
+        $this->assertEquals('no', $this->extract('missing ?? anotherMissing ?? notThere ?? boo'));
         // basic chain with a fallback (a path consisting of a literal resolves to the literal value itself)
         $this->assertEquals('fallback', $this->extract('missing ?? qux.missing ?? "fallback"'));
     }
@@ -345,7 +425,11 @@ final class PropPathIntegrationTest extends TestCase
     {
         $barr_bar = [3 => 3, 4 => 4, 5 => 5];
         // @*.bar - preserve immediate parent keys
-        $this->assertEquals(['foo' => 5, 'barr' => $barr_bar, 'qux' => 'can'], $this->extract('@*.bar'));
+        $this->assertEquals([
+            'foo'  => 5,
+            'barr' => $barr_bar,
+            'qux'  => 'can',
+        ], $this->extract('@*bar'));
 
         // *.bar - immediate children only
         $this->assertEquals([5, $barr_bar, 'can'], $this->extract('*.bar'));
@@ -498,13 +582,44 @@ final class PropPathIntegrationTest extends TestCase
         $this->assertEquals(4, $this->extract('barr.!bar.4'));
     }
 
+    public function testComplexQuery(): void
+    {
+        $this->roots = [
+            'dto' => [
+                'user' => [
+                    'name'      => 'Jane',
+                    'email'     => 'jane@example.com',
+                    'addresses' => [
+                        'home'   => ['city' => 'Geneva', 'zip' => '1201'],
+                        'office' => ['city' => 'Carouge', 'zip' => '1214', 'phone' => 1234],
+                    ],
+                ],
+            ],
+            'context' => ['request' => ['search' => 'foo']],
+        ];
+
+        $extracted = $this->extract('user[
+            "zips" => addresses[*[city => zip]]@~,
+            "phone" => [[**phone]0 ?? "no phone"],
+            "fax" => [[**fax]0 ?? "no fax"],
+            $context.request.@search
+        ]');
+
+        $this->assertEquals([
+            'zips'   => ['Geneva' => '1201', 'Carouge' => '1214'],
+            'search' => 'foo',
+            'phone'  => 1234,
+            'fax'    => 'no fax',
+        ], $extracted);
+    }
+
     public function testSliceOnNullContainerFails(): void
     {
         $this->roots['value']['nullish'] = null;
         $this->assertThrows(
-            fn (): mixed => $this->extract('nullish.1:2'),
+            fn (): mixed => $this->extract('nullish.!1:2'),
             EvaluationError::class,
-            'Path segment $value.nullish.`1:2` cannot be sliced: null is null.'
+            'Path segment $value.`nullish` is null and cannot be sliced.'
         );
     }
 
@@ -512,52 +627,82 @@ final class PropPathIntegrationTest extends TestCase
     {
         $this->roots['value']['notSliceable'] = new \stdClass();
         $this->assertThrows(
-            fn (): mixed => $this->extract('notSliceable.1:3'),
+            fn (): mixed => $this->extract('notSliceable.!1:3'),
             EvaluationError::class,
-            'cannot be sliced: stdClass is not an array or ArrayAccess'
+            'Path segment $value.`notSliceable` cannot be sliced: stdClass is not an array or ArrayAccess.'
         );
     }
 
     public function testNegativeStartFailsOnNonCountable(): void
     {
         $this->assertThrows(
-            fn (): mixed => $this->extract('barr.-2:3'),
+            fn (): mixed => $this->extract('barr.!-2:3'),
             EvaluationError::class,
-            'Path segment $value.barr.`-2:3` cannot be sliced with negative start: ArrayAccess@anonymous is not countable'
+            'Path segment $value.`barr` cannot be sliced with negative start: ArrayAccess@anonymous is not countable.'
         );
     }
 
     public function testNegativeEndFailsOnNonCountable(): void
     {
         $this->assertThrows(
-            fn (): mixed => $this->extract('barr.1:-3'),
+            fn (): mixed => $this->extract('barr.!1:-3'),
             EvaluationError::class,
-            'Path segment $value.barr.`1:-3` cannot be sliced with negative end: ArrayAccess@anonymous is not countable'
+            'Path segment $value.`barr` cannot be sliced by `1:-3` with negative end: ArrayAccess@anonymous is not countable.',
         );
     }
 
     public function testNullEndFailsOnNonCountable(): void
     {
         $this->assertThrows(
-            fn (): mixed => $this->extract('barr.3:'),
+            fn (): mixed => $this->extract('barr.!3:'),
             EvaluationError::class,
-            'Path segment $value.barr.`3:` cannot be sliced with null end: ArrayAccess@anonymous is not countable.'
+            'Path segment $value.`barr` cannot be sliced by `3:` with null end: ArrayAccess@anonymous is not countable.'
         );
     }
 
     public function testTokenizerThrowsOnUnknownCharacter(): void
     {
+        // The tokenizer should throw an error when it encounters an unknown character.
         $this->expectException(SyntaxError::class);
         $this->expectExceptionMessage('Unexpected character \'#\' at position 4');
         TokenStream::fromString('barr#');
     }
 
+    public function testItFailsFlatteningANonContainer(): void
+    {
+        $this->assertSame('no', $this->extract('boo~'));
+
+        // The tokenizer should throw an error when it encounters an unknown character.
+        $this->assertThrows(
+            fn (): mixed => $this->extract('boo!~'),
+            EvaluationError::class,
+            'Expected a container, got: string'
+        );
+    }
+
+    public function testItFailsFlatteningWhenNoSubCountainersFound(): void
+    {
+        // The `~` operator flattens one level of sub-containers within a container.
+
+        // One bang prefix (!~) means throw if the value is not a container.
+        // $dto.quux[0] is an array, so it should not throw.
+        $this->assertSame([1, 2], $this->extract('$.quux[0].!~'));
+
+        // Two bangs (!!~) means throw if the value is not a container or if it does not contain any sub-containers.
+        // $dto.quux[0] is an array but only contains scalar values, so it should throw.
+        $this->expectException(EvaluationError::class);
+        $this->expectExceptionMessage('Path segment $value.quux.`[0]` does not contain a sub-container to be flattened');
+        $this->extract('$.quux[0].!!~');
+    }
+
     public function testParserFailsOnMultipleAtFlagsInSinglePath(): void
     {
+        // The '@' flag can only be used on one segment per path, so this should throw an error.
+        // In this case, "foo.@zab.@can" would mean "use both `zab` and `can` as key" but this makes no sense,
+        // since only one key can be used for a given value.
         $this->assertThrows(
             fn (): mixed => $this->extract('$.[foo.@zab.@can]'),
             SyntaxError::class,
-            // TODO: fix error message so path and failing segment are shown
             'Failed parsing "$.[foo.@zab.@can]" near "$.[foo.@zab.@can": only one segment per path can have the preserve keys flag `@`.'
         );
     }
@@ -567,28 +712,37 @@ final class PropPathIntegrationTest extends TestCase
         $this->assertThrows(
             fn (): mixed => $this->extract('$.[foo,=>]'),
             SyntaxError::class,
-            // TODO: fix error message so path and failing segment are shown
             'Failed parsing "$.[foo,=>]" near "$.[foo,": expected identifier or slice, got: =>.'
         );
     }
 
     public function testParserFailsOnInvalidTokenInBracket2(): void
     {
+        // `baz` path segment has value 5, but next segment is a bracket in "mandatory mode" (!),
+        // which expects the previous segment to be a container. 5 is not a container, so it fails.
         $this->assertThrows(
-            fn (): mixed => $this->extract('foo.bar.baz[foo,1:3]'),
-            SyntaxError::class,
-            // TODO: fix error message so path and failing segment are shown
-            'Failed parsing "foo.bar.baz[foo,1:3]" near "foo.bar.baz[foo,1:": Unexpected token ":" in bracket expression.'
+            fn (): mixed => $this->extract('foo.bar.baz![foo,1:3]'),
+            EvaluationError::class,
+            'Path segment $value.foo.bar.baz.`foo` could not be extracted from non-container of type `null`.'
         );
     }
 
     public function testParserFailsOnBangAndQuestionTogether(): void
     {
+        // The bang (!) and question (?) prefixes cannot be used together, as they represent conflicting modes.
         $this->assertThrows(
             fn (): mixed => $this->extract('foo.bar.baz?![foo,1]'),
             SyntaxError::class,
-            // TODO: fix error message so path and failing segment are shown
             'Failed parsing "foo.bar.baz?![foo,1]" near "foo.bar.baz?!": a segment\'s mode cannot be both "required" and "optional".'
+        );
+    }
+
+    public function testCompilerFailsOnEmptyPath(): void
+    {
+        $this->assertThrows(
+            fn (): mixed => $this->extract(''),
+            \InvalidArgumentException::class,
+            'Cannot compile an empty path.'
         );
     }
 
@@ -598,7 +752,6 @@ final class PropPathIntegrationTest extends TestCase
         $this->assertThrows(
             fn (): mixed => $this->extract('foo.bar'),
             \InvalidArgumentException::class,
-            // TODO: fix error message so path and failing segment are shown
             'Roots must be a non-empty array.'
         );
 
@@ -606,22 +759,7 @@ final class PropPathIntegrationTest extends TestCase
         $this->assertThrows(
             fn (): mixed => $this->extract('$foo.bar'),
             \InvalidArgumentException::class,
-            // TODO: fix error message so path and failing segment are shown
             'Roots keys must be identifiers (strings matching \'/^[a-z_][\w-]*$/i\').'
-        );
-    }
-
-    public function testPropPathCompileFailsOnPathsNotJsonSerializable(): void
-    {
-        // self-referential loop
-        $struct = ['$.[foo.@zab.can]'];
-        /** @psalm-suppress UnsupportedReferenceUsage */
-        $struct[] = &$struct;
-
-        $this->assertThrows(
-            fn (): mixed => $this->extract($struct),
-            \InvalidArgumentException::class,
-            'Failed to serialize $paths to JSON.'
         );
     }
 }

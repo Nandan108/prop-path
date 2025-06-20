@@ -20,22 +20,25 @@ final class Compiler
      */
     public static function compile(
         array|string $paths,
-        string $fullPath,
         ?callable $failParseWith,
         // ?callable $failEvalWith,
         ThrowMode $defaultThrowMode,
     ): array {
+        if ('' === $paths) {
+            throw new \InvalidArgumentException('Cannot compile an empty path.');
+        }
+
         $context = new ExtractContext(
             roots: [], // Empty roots during compilation
-            fullPath: $fullPath,
+            paths: $paths,
             throwMode: $defaultThrowMode,
             failParseWith: $failParseWith,
             // failWith: $failEvalWith, // Not needed during compilation
         );
 
         $extractor = is_array($paths)
-            ? self::compileStructure($paths, $context)
-            : self::compileString($paths, $context);
+            ? self::compileInputStructure($paths, $context)
+            : self::compileInputString($paths, $context);
 
         return [
             'context'   => $context,
@@ -43,14 +46,14 @@ final class Compiler
         ];
     }
 
-    private static function compileStructure(array $structure, ExtractContext $context): \Closure
+    private static function compileInputStructure(array $structure, ExtractContext $context): \Closure
     {
         $compiled = [];
 
         foreach ($structure as $key => $paths) {
             $compiled[$key] = (is_array($paths))
-                ? self::compileStructure($paths, $context)
-                : self::compileString($paths, $context);
+                ? self::compileInputStructure($paths, $context)
+                : self::compileInputString($paths, $context);
         }
 
         return function (mixed $container) use (&$compiled): array {
@@ -65,11 +68,23 @@ final class Compiler
         };
     }
 
-    private static function compileString(string $path, ExtractContext $context): \Closure
+    /**
+     * This function is made public for testing and debugging purposes.
+     * Parses a path string into an AST (Abstract Syntax Tree) starting at a Chain node.
+     *
+     * @return array<Seg\ParsedLiteral|Seg\ParsedPath>
+     */
+    public static function getAST(string $path, ExtractContext $context): array
     {
-        $stream = TokenStream::fromString($path);
-        $parsed = Parser::parseChain($stream, $context);
-        $result = self::compileChain($parsed, $context);
+        $ts = TokenStream::fromString($path);
+
+        return Parser::parseChain($ts, $context, inBraket: false); // Parse the path into an AST (Abstract Syntax Tree)
+    }
+
+    private static function compileInputString(string $path, ExtractContext $context): \Closure
+    {
+        $AST = self::getAST($path, $context);
+        $result = self::compileChain($AST, $context);
 
         return $result;
     }
@@ -77,7 +92,7 @@ final class Compiler
     /**
      * @param array<Seg\ParsedPath|Seg\ParsedLiteral> $paths
      */
-    public static function compileChain(array $paths, ExtractContext $context, ?\Closure $upstream = null, bool $preserveKey = false, bool $inBracket = false): \Closure
+    public static function compileChain(array $paths, ExtractContext $context, bool $preserveKey = false, bool $isRoot = true): \Closure
     {
         $compiledPaths = [];
 
@@ -110,33 +125,43 @@ final class Compiler
             if (null === $key) {
                 $compiledPaths[] = [null, $compiledPath];
             } else {
+                if ($key instanceof Seg\ParsedPath) {
+                    $key = self::compilePath($key->segments, $context);
+                }
                 $compiledPaths[] = [$key, $compiledPath];
             }
         }
 
-        return function (mixed $container) use ($context, $upstream, $compiledPaths, $inBracket) {
-            if ($upstream) {
-                $container = $upstream($container);
-            }
+        return function (mixed $container) use ($context, $compiledPaths, $isRoot): mixed {
+            $keyStack = $context->keyStack;
 
-            $stackLevel = $context->getStackLevel();
             /** @psalm-suppress UnnecessaryVarAnnotation */
-            /** @var \Closure $fn */
-            foreach ($compiledPaths as [$key, $fn]) {
-                // no need to catch exceptions here
-                $result = $fn($container);
-                $context->resetStackLevel($stackLevel); // reset context stack level after each segment
+            /** @var \Closure $compiledPath */
+            foreach ($compiledPaths as [$key, $compiledPath]) {
+                // make sure we reset the context's $keyStack before each evaluating each path
+                $context->keyStack = $keyStack;
+                $result = $compiledPath($container);
 
-                // return the first non-null result
+                // if return result is non-null, we return it
                 if (null !== $result) {
-                    return $inBracket
-                        ? [$key, $result] // within bracket, we return a key too
-                        : $result; // root chain just returns final result
+                    // root chain just returns final result
+                    if ($isRoot) {
+                        return $result;
+                    }
+
+                    // If the key is a closure, we resolve it now
+                    if ($key instanceof \Closure) {
+                        $key = $key($container);
+                    }
+
+                    // If not $isRoot (within bracket), we return a key too
+                    return [$key, $result];
                 }
             }
 
-            // all segments returned null, so we return null
-            return $inBracket ? [null, null] : null;
+            return $isRoot
+                ? null
+                : [null, null];
         };
     }
 
@@ -169,6 +194,7 @@ final class Compiler
             // if the segment is a ParsedKey, ParsedSlice, or ParsedBracket, compile it accordingly
             $seg instanceof Seg\ParsedRoot    => self::compileRootSegment($seg, $context),
             $seg instanceof Seg\ParsedKey     => self::compileKeySegment($seg, $upstream, $context),
+            $seg instanceof Seg\ParsedFlatten => self::compileFlattenSegment($seg, $upstream, $context),
             $seg instanceof Seg\ParsedSlice   => self::compileSliceSegment($seg, $upstream, $context),
             $seg instanceof Seg\ParsedBracket => self::compileBracketSegment($seg, $upstream, $context),
             // default will never happen, but let's keep static analysis happy
@@ -176,23 +202,91 @@ final class Compiler
         };
     }
 
+    private static function compileFlattenSegment(Seg\ParsedFlatten $seg, ?\Closure $upstream, ExtractContext $context): \Closure
+    {
+        $getItems = function (mixed $value, array $throwOn, Seg\ParsedFlatten $seg, ExtractContext $context): mixed {
+            if (is_array($value)) {
+                return $value; // if it's an array, we can use it directly
+            }
+            $getterMap = AccessorRegistry::getGetterMap($value, throwOnNotFound: false);
+
+            if (is_array($getterMap)) {
+                $items = [];
+                foreach ($getterMap as $key => $getter) {
+                    $items[$key] = $getter($value);
+                }
+
+                return $items;
+            }
+
+            if (in_array($seg->mode, $throwOn)) {
+                $context->fail('Expected a container, got: '.get_debug_type($value));
+            }
+
+            return $value;
+        };
+
+        return function (array|object $data) use ($seg, $upstream, $context, $getItems): mixed {
+            $value = $upstream ? $upstream($data) : $data;
+
+            $throwOn = [ThrowMode::NOT_A_CONTAINER, ThrowMode::NOT_CONTAINING_CONTAINERS];
+
+            $items = $getItems($value, $throwOn, $seg, $context);
+
+            if (!is_array($items)) {
+                // No need to throw an "Expected a container" error, it would already
+                // be thrown by $getItems if the mode is not ThrowMode::NEVER.
+                return $items;
+            }
+
+            $flattenedOutput = [];
+            $subContainersFound = false;
+
+            foreach ($items as $outerKey => $outerItem) {
+                // Merge items
+                $subItems = $getItems($outerItem, [], $seg, $context);
+
+                if (is_array($subItems)) {
+                    $subContainersFound = true;
+                    foreach ($subItems as $innerKey => $innerItem) {
+                        $seg->preserveKeys
+                            ? $flattenedOutput[$innerKey] = $innerItem
+                            : $flattenedOutput[] = $innerItem;
+                    }
+                } else {
+                    $seg->preserveKeys
+                        ? $flattenedOutput[$outerKey] = $outerItem
+                        : $flattenedOutput[] = $outerItem;
+                }
+            }
+
+            if (!$subContainersFound && ThrowMode::NOT_CONTAINING_CONTAINERS === $seg->mode) {
+                $context->fail('does not contain a sub-container to be flattened');
+            }
+
+            $context->push($seg->raw);
+
+            return $flattenedOutput;
+        };
+    }
+
     private static function compileRecursiveSegment(Seg\ParsedRecursive $seg, ?\Closure $upstream, ExtractContext $context, ?\Closure $downStream): \Closure
     {
-        return function (mixed $container) use ($seg, $upstream, $context, $downStream): array {
-            $container = $upstream ? $upstream($container) : $container;
+        return function (mixed $upsteamContainer) use ($seg, $upstream, $context, $downStream): array {
+            $container = $upstream ? $upstream($upsteamContainer) : $upsteamContainer;
             $results = [];
 
             $context->push(1 === $seg->depth ? '*' : '**', $seg->mode);
+            $stack = $context->keyStack;
 
             self::walkRecursive($container, $results, $seg->depth - 1, $seg->preserveKey, $context);
 
-            $stackLevel = $context->getStackLevel();
             $output = [];
             foreach ($results as $k => $v) {
                 // If a downstream closure is provided, apply it to each result
                 if ($downStream) {
                     $v = $downStream($v);
-                    $context->resetStackLevel($stackLevel); // reset context stack level after each downstream call
+                    $context->keyStack = $stack; // reset context stack level after each downstream call
                 }
 
                 if (null !== $v) {
@@ -240,7 +334,9 @@ final class Compiler
                 }
             }
         } elseif (is_object($node)) {
-            foreach (AccessorRegistry::getGetterMap($node) as $k => $getter) {
+            $getterMap = AccessorRegistry::getGetterMap($node);
+            /** @var callable(mixed)[] $getterMap */
+            foreach ($getterMap as $k => $getter) {
                 $v = $getter($node);
                 if ($preserveKey) {
                     $results[$k] = $v;
@@ -271,7 +367,7 @@ final class Compiler
                 $context->fail(": root `$key` not found in roots (valid roots are: ".substr($jsonRoots, 1, -1).')');
             }
 
-            $context->resetStackLevel(0); // reset stack level to 0, as we are at the root
+            $context->keyStack = []; // reset stack level to 0, as we are at the root
             $context->push('$'.$key);
 
             return $context->roots[$key];
@@ -292,6 +388,9 @@ final class Compiler
 
         $mode = $seg->mode ?? $context->currentMode();
 
+        // If we specifying a return type here, intelephense complains: "Not all paths return a value",
+        // despite the presence of a final throw (via $this->fail()). So instead, we don't declare a
+        // return type and suppress psalm's complaint.
         /** @psalm-suppress MissingClosureReturnType */
         return match ($mode) {
             ThrowMode::MISSING_KEY => function (mixed $parentContainer) use ($setup) {
@@ -299,11 +398,9 @@ final class Compiler
 
                 if (is_array($container)) {
                     if (!array_key_exists($key, $container)) {
-                        /** @psalm-suppress PossiblyFalseOperand */
+                        // /** @psalm-suppress PossiblyFalseOperand */
                         $context->fail('not found in array');
                     }
-
-                    // $context->pop(); // pop the key from context, pushed in $setup()
 
                     return $container[$key];
                 }
@@ -313,8 +410,6 @@ final class Compiler
                         $context->fail('not found in ArrayAccess');
                     }
 
-                    // $context->pop();
-
                     return $container[$key];
                 }
 
@@ -323,8 +418,6 @@ final class Compiler
                     if (!$getter) {
                         $context->fail('not accessible on '.get_class($container));
                     }
-
-                    // $context->pop();
 
                     return $getter($container);
                 }
@@ -340,8 +433,6 @@ final class Compiler
                         $context->fail('is null but required');
                     }
 
-                    // $context->pop();
-
                     return $container[$key];
                 }
                 if ($container instanceof \ArrayAccess) {
@@ -349,8 +440,6 @@ final class Compiler
                     if (null === $value) {
                         $context->fail('is null but required');
                     }
-
-                    // $context->pop();
 
                     return $container[$key];
                 }
@@ -364,8 +453,6 @@ final class Compiler
                     if (null === $value) {
                         $context->fail('is null but required');
                     }
-
-                    // $context->pop();
 
                     return $value;
                 }
@@ -395,7 +482,7 @@ final class Compiler
 
     private static function compileSliceSegment(Seg\ParsedSlice $seg, ?\Closure $upstream, ExtractContext $context): \Closure
     {
-        return function (mixed $container) use ($seg, $upstream, $context): array|\ArrayAccess {
+        return function (mixed $container) use ($seg, $upstream, $context): array|\ArrayAccess|null {
             $start = $seg->start;
             $end = $seg->end;
 
@@ -404,18 +491,24 @@ final class Compiler
             }
             $context->push($seg->raw);
 
-            $fail = function (string $message) use ($context, $container): never {
+            $throwMode = $seg->mode ?? $context->currentMode();
+
+            $fail = function (string $message) use ($throwMode, $context, $container): ?array {
+                if (ThrowMode::NEVER === $throwMode) {
+                    return null; // if mode is NEVER, we just return null
+                }
                 $type = get_debug_type($container);
                 $message = str_replace('{type}', $type, $message);
 
+                array_pop($context->keyStack);
                 $context->fail($message);
             };
 
             if (null === $container) {
-                $fail('cannot be sliced: {type} is null');
+                return $fail('is null and cannot be sliced');
             }
             if (!(is_array($container) || $container instanceof \ArrayAccess)) {
-                $fail('cannot be sliced: {type} is not an array or ArrayAccess');
+                return $fail('cannot be sliced: {type} is not an array or ArrayAccess');
             }
             $isCountable = is_array($container) || $container instanceof \Countable;
 
@@ -428,21 +521,20 @@ final class Compiler
                 $start = 0;
             } elseif ($start < 0) {
                 if (!$isCountable) {
-                    $fail('cannot be sliced with negative start: {type} is not countable');
+                    return $fail('cannot be sliced with negative start: {type} is not countable');
                 }
-                /** @psalm-suppress PossiblyInvalidArgument */
                 $start += count($container);
             }
 
             if (null === $end) {
                 if (!$isCountable) {
-                    $fail('cannot be sliced with null end: {type} is not countable');
+                    return $fail("cannot be sliced by `$seg->raw` with null end: {type} is not countable");
                 }
                 /** @psalm-suppress PossiblyInvalidArgument */
                 $end = count($container); // means "slice to the end"
             } elseif ($end < 0) {
                 if (!$isCountable) {
-                    $fail('cannot be sliced with negative end: {type} is not countable');
+                    return $fail("cannot be sliced by `$seg->raw` with negative end: {type} is not countable");
                 }
                 /** @psalm-suppress PossiblyInvalidArgument */
                 $end += count($container);
@@ -457,6 +549,7 @@ final class Compiler
             } else {
                 // $container is ArrayAccess
                 for ($slice = [], $k = $start; $k < $end; ++$k) {
+                    /** @var \ArrayAccess $container */
                     if ($container->offsetExists($k)) {
                         if ($seg->preserveKey) {
                             $slice[$k] = $container[$k] ?? null;
@@ -467,24 +560,20 @@ final class Compiler
                 }
             }
 
-            $throwMode = $seg->mode ?? $context->currentMode();
-
             // check slice keys and throw according to $seg->throwMode
             if (ThrowMode::MISSING_KEY === $throwMode) {
                 if (count($slice) < ($end - $start)) {
                     [$length, $count] = [$end - $start, count($slice)];
 
-                    $fail("slice is missing some keys: expected $length but got $count");
+                    return $fail("slice `$seg->raw` is missing some keys: expected $length but got $count");
                 }
             } elseif (ThrowMode::NULL_VALUE === $throwMode) {
                 foreach ($slice as $k => $v) {
                     if (null === $v) {
-                        $fail("slice contains a null value at key `$k`");
+                        return $fail("slice `$seg->raw` contains a null value at key `$k`");
                     }
                 }
             }
-
-            // $context->pop();
 
             return $slice;
         };
@@ -498,23 +587,23 @@ final class Compiler
 
         $compiledBracketParts = [];
         foreach ($seg->chains as $chain) {
-            $extractor = self::compileChain($chain, $context, $upstream, $seg->preserveKey, true);
+            $extractor = self::compileChain($chain, $context, $seg->preserveKey, isRoot: false);
             $compiledBracketParts[] = $extractor;
         }
 
         $context->pop();
 
         // bracket segment (multi)
-        return function (mixed $container) use ($context, $compiledBracketParts, $upstream) {
-            if ($upstream) {
-                $container = $upstream($container);
-            }
+        return function (mixed $upstreamContainer) use ($seg, $context, $compiledBracketParts, $upstream) {
+            $container = $upstream
+                ? $upstream($upstreamContainer)
+                : $upstreamContainer; // upstream is optional, if not provided, we use the upstreamContainer directly
 
             $bracket = [];
-            $stackLevel = $context->getStackLevel();
+            $keyStack = $context->keyStack;
             foreach ($compiledBracketParts as $compiledChainExtractor) {
                 $result = $compiledChainExtractor($container);
-                $context->resetStackLevel($stackLevel); // reset stack level after each chain extraction
+                $context->keyStack = $keyStack; // reset context stack level after each segment
                 if ($result) {
                     [$key, $value] = $result;
 
@@ -525,7 +614,7 @@ final class Compiler
                 }
             }
 
-            $context->pop(); // mode
+            $context->push($seg->raw);
 
             return 1 === count($bracket) && array_is_list($bracket)
                 ? reset($bracket) // if there's only one item in the bracket and preserveKey is false, return it directly

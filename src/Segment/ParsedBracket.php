@@ -6,18 +6,16 @@ use Nandan108\PropPath\Support\ThrowMode;
 
 final class ParsedBracket extends ParsedSegment
 {
-    /** @psalm-suppress PossiblyUnusedProperty */
-    public string $raw;
-
     /**
      * @param array<array<ParsedLiteral|ParsedPath>> $chains
      */
     public function __construct(
         public array $chains,
-        public ?ThrowMode $mode,
+        ?ThrowMode $mode,
         string $raw = '',
         public bool $preserveKey = false,
     ) {
         $this->raw = $raw;
+        $this->mode = $mode;
     }
 }

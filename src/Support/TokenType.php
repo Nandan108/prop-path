@@ -7,18 +7,19 @@ enum TokenType: string
     case Arrow = '=>';
     case At = '@';
     case Bang = '!';
+    case BracketClose = ']';
+    case BracketOpen = '[';
     case Colon = ':';
     case Comma = ',';
+    case DblBang = '!!';
+    case DblQstn = '??';
     case Dollar = '$';
     case Dot = '.';
-    case DblBang = '!!';
     case EOF = 'EOF';
-    case DblQstn = '??';
     case Identifier = 'IDENT';
-    case BracketOpen = '[';
+    case Integer = 'INTEGER';
     case Qstn = '?';
-    case BracketClose = ']';
     case Star = '*';
     case String = 'STRING';
-    case Integer = 'INTEGER';
+    case Tilde = '~';
 }

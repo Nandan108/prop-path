@@ -9,9 +9,11 @@ final class ParsedSlice extends ParsedSegment
     public function __construct(
         public ?int $start,
         public ?int $end,
-        public ?ThrowMode $mode,
-        public string $raw,
+        ?ThrowMode $mode,
+        string $raw,
         public bool $preserveKey,
     ) {
+        $this->raw = $raw;
+        $this->mode = $mode;
     }
 }

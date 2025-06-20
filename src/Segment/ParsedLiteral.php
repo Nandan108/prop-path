@@ -6,7 +6,8 @@ final class ParsedLiteral extends ParsedSegment
 {
     public function __construct(
         public int|string $value,
-        public ?string $key,
+        public ParsedPath|string|null $key,
     ) {
+        $this->raw = (string) $value;
     }
 }

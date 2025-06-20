@@ -16,7 +16,7 @@ final class ExtractContext
     /**
      * The callable to invoke when evaluating a path segment fails.
      *
-     * @var \Closure(array, string, array, string): never
+     * @var \Closure(array, string): never
      */
     public \Closure $failWith;
 
@@ -36,18 +36,20 @@ final class ExtractContext
     public array $keyStack = [];
 
     /**
-     * Constructs a new HandleFail instance.
+     * Constructs a new ExtractContext instance.
+     *
+     * @param array|non-empty-string $paths
      *
      * @throws \InvalidArgumentException
      */
     public function __construct(
         public array $roots,
-        public string $fullPath,
+        public string|array $paths,
         public ThrowMode $throwMode,
-        ?callable $failWith = null,
-        ?callable $failParseWith = null,
+        ?\Closure $failWith = null,
+        ?\Closure $failParseWith = null,
     ) {
-        $this->failWith = $failWith ?? function (array $roots, string $fullPath, array $keyStack, string $msg): never {
+        $this->failWith = $failWith ?? function (array $keyStack, string $msg): never {
             $keyStack = array_map(fn ($item): mixed => $item[0], $keyStack);
             $keyStack = array_filter($keyStack, fn ($item): bool => null !== $item && '' !== $item);
             $lastKey = array_pop($keyStack);
@@ -55,13 +57,20 @@ final class ExtractContext
 
             throw new EvaluationError("Path segment $keyStackStr $msg.");
         };
+        // Ensure the failWith closure is bound to the current instance so it has acccess to the whole context if necessary.
+        $this->failWith = $this->failWith->bindTo($this, self::class) ?? $this->failWith;
 
-        $this->failParseWith = $failParseWith ?? function (string $msg, ?string $parsed = null) use ($fullPath): never {
-            $fullPathJson = json_encode($fullPath);
+        $this->failParseWith = $failParseWith ?? function (string $msg, ?string $parsed = null): never {
+            /** @psalm-suppress RiskyTruthyFalsyComparison */
+            $fullPathJson = json_encode($this->paths) ?: '[$paths not serializable to JSON]';
+
             /** @psalm-suppress RiskyTruthyFalsyComparison, PossiblyFalseOperand */
-            $msg = "Failed parsing $fullPathJson".($parsed ? ' near '.json_encode($parsed) : '').": $msg.";
+            $parsedJson = $parsed ? json_encode($parsed) : null;
+            $msg = "Failed parsing $fullPathJson".(null !== $parsed ? " near $parsedJson" : '').": $msg.";
             throw new SyntaxError($msg);
         };
+        // Ensure the failParseWith closure is bound to the current instance.
+        $this->failParseWith = $this->failParseWith->bindTo($this, self::class) ?? $this->failParseWith;
 
         is_callable($this->failWith) or throw new \InvalidArgumentException('The failWith argument must be a callable.');
     }
@@ -87,22 +96,6 @@ final class ExtractContext
     public function push(?string $key = null, ?ThrowMode $mode = null): static
     {
         array_push($this->keyStack, [$key ?? '', $mode ?? $this->getCurrentMode()]);
-
-        return $this;
-    }
-
-    public function getStackLevel(): int
-    {
-        return count($this->keyStack);
-    }
-
-    public function resetStackLevel(int $level): static
-    {
-        // Ensure the level is valid: it must be non-negative and not exceed the current stack size.
-        // Using a one-liner syntax here to have full coverage without having to test never-happening sad path
-        !$level || isset($this->keyStack[$level - 1]) or throw new \OutOfRangeException("Invalid stack level: $level");
-
-        $this->keyStack = array_slice($this->keyStack, 0, $level);
 
         return $this;
     }
@@ -135,7 +128,7 @@ final class ExtractContext
      */
     public function fail(string $message): never
     {
-        ($this->failWith)($this->roots, $this->fullPath, $this->keyStack, $message);
+        ($this->failWith)($this->keyStack, $message);
     }
 
     public function failParse(TokenStream $ts, string $message, int $additional = 0): never

@@ -8,8 +8,10 @@ final class ParsedRecursive extends ParsedSegment
 {
     public function __construct(
         public readonly int $depth, // 1 for *, -1 for **
-        public readonly ?ThrowMode $mode,
+        ?ThrowMode $mode,
         public readonly bool $preserveKey,
     ) {
+        $this->raw = 1 === $depth ? '*' : '**';
+        $this->mode = $mode;
     }
 }
