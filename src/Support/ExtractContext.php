@@ -16,14 +16,14 @@ final class ExtractContext
     /**
      * The callable to invoke when evaluating a path segment fails.
      *
-     * @var \Closure(array, string): never
+     * @var \Closure(string, list<array{string, ThrowMode}>): never
      */
     public \Closure $failWith;
 
     /**
      * The callable to invoke when parsing a path segment fails.
      *
-     * @var \Closure(string, string|null): never
+     * @var \Closure(string, ?string): never
      */
     public \Closure $failParseWith;
 
@@ -31,34 +31,32 @@ final class ExtractContext
      * The stack of keys traversed so far in the path.
      * This is used to format error messages.
      *
-     * @var array<int, array{string, ThrowMode}>
+     * @var list<array{string, ThrowMode}>
      */
     public array $keyStack = [];
+
+    public array $roots;
 
     /**
      * Constructs a new ExtractContext instance.
      *
-     * @param array|non-empty-string $paths
+     * @param \Closure(string, ?string): never $failParseWith
      *
      * @throws \InvalidArgumentException
      */
     public function __construct(
-        public array $roots,
         public string|array $paths,
-        public ThrowMode $throwMode,
-        ?\Closure $failWith = null,
+        array $roots = [],
+        public ThrowMode $throwMode = ThrowMode::NEVER,
         ?\Closure $failParseWith = null,
     ) {
-        $this->failWith = $failWith ?? function (array $keyStack, string $msg): never {
-            $keyStack = array_map(fn ($item): mixed => $item[0], $keyStack);
-            $keyStack = array_filter($keyStack, fn ($item): bool => null !== $item && '' !== $item);
-            $lastKey = array_pop($keyStack);
-            $keyStackStr = implode('.', $keyStack).($keyStack ? '.' : '')."`$lastKey`";
+        // Ensure the failParseWith closure is bound to the current instance.
+        if ($failParseWith) {
+            /** @var \Closure(string, ?string): never */
+            $failParseWith = $failParseWith->bindTo($this, self::class) ?? $failParseWith;
+        }
 
-            throw new EvaluationError("Path segment $keyStackStr $msg.");
-        };
-        // Ensure the failWith closure is bound to the current instance so it has acccess to the whole context if necessary.
-        $this->failWith = $this->failWith->bindTo($this, self::class) ?? $this->failWith;
+        $this->roots = $roots;
 
         $this->failParseWith = $failParseWith ?? function (string $msg, ?string $parsed = null): never {
             /** @psalm-suppress RiskyTruthyFalsyComparison */
@@ -69,15 +67,38 @@ final class ExtractContext
             $msg = "Failed parsing $fullPathJson".(null !== $parsed ? " near $parsedJson" : '').": $msg.";
             throw new SyntaxError($msg);
         };
-        // Ensure the failParseWith closure is bound to the current instance.
-        $this->failParseWith = $this->failParseWith->bindTo($this, self::class) ?? $this->failParseWith;
 
-        is_callable($this->failWith) or throw new \InvalidArgumentException('The failWith argument must be a callable.');
+        $this->failWith = function (string $msg, array $keyStack): never {
+            $keyStack = array_map(
+                /** @param array{?string, ?ThrowMode} $item */
+                fn (array $item): ?string => $item[0],
+                $keyStack
+            );
+            $keyStack = array_filter($keyStack, fn ($item): bool => null !== $item && '' !== $item);
+            $lastKey = array_pop($keyStack);
+            $keyStackStr = implode('.', $keyStack).($keyStack ? '.' : '')."`$lastKey`";
+
+            throw new EvaluationError("Path segment $keyStackStr $msg.");
+        };
     }
 
-    public function prepareForEval(array $roots, ?callable $failWith = null): static
+    /**
+     * Prepare the context for evaluation by setting the roots and possibly the failWith closure.
+     *
+     * @param ?\Closure(string, list<array{string, ThrowMode}>): never $failWith
+     *
+     * @throws EvaluationError
+     * @throws \InvalidArgumentException
+     */
+    public function prepareForEval(array $roots, ?\Closure $failWith = null): void
     {
         $this->keyStack = [];
+        // Ensure the failWith closure is bound to the current instance so it has acccess to the whole context if necessary.
+        if ($failWith) {
+            /** @var \Closure(string, list<array{string, ThrowMode}>): never */
+            $failWith = $failWith->bindTo($this, self::class) ?? $failWith;
+        }
+
         $this->failWith = $failWith ?? $this->failWith;
 
         $this->roots = $roots;
@@ -89,8 +110,6 @@ final class ExtractContext
                 throw new \InvalidArgumentException('Roots keys must be identifiers (strings matching \'/^[a-z_][\w-]*$/i\').');
             }
         }
-
-        return $this;
     }
 
     public function push(?string $key = null, ?ThrowMode $mode = null): static
@@ -128,7 +147,7 @@ final class ExtractContext
      */
     public function fail(string $message): never
     {
-        ($this->failWith)($this->keyStack, $message);
+        ($this->failWith)($message, $this->keyStack);
     }
 
     public function failParse(TokenStream $ts, string $message, int $additional = 0): never

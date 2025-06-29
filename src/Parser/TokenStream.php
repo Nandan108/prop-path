@@ -13,6 +13,9 @@ final class TokenStream
 
     private int $index = 0;
 
+    /**
+     * @param array<Token> $tokens
+     */
     public function __construct(array $tokens)
     {
         $this->tokens = array_values($tokens); // reset keys
@@ -106,6 +109,11 @@ final class TokenStream
         return $tokens;
     }
 
+    public function rewind(int $count): void
+    {
+        $this->index -= $count;
+    }
+
     public function valueSince(int $startIndex, int $additional = 0): string
     {
         $value = '';
@@ -116,7 +124,7 @@ final class TokenStream
         return $value;
     }
 
-    public static function fromString(string $input): TokenStream
+    public static function fromString(string $input, bool $includeComments = false): TokenStream
     {
         $pos = 0;
         $len = strlen($input);
@@ -157,6 +165,62 @@ final class TokenStream
             if ($token) {
                 $tokens[] = $token;
                 $pos += strlen($token->value);
+                continue;
+            }
+
+            // Tokens starting with a slash
+            if ('/' === $c) {
+                $start = $pos;
+                $c = $input[++$pos]; // skip "/", get tne next character
+
+                // Line comments
+                if ('/' === $c) {
+                    ++$pos; // skip "/"
+                    while ($pos < $len && "\n" !== $input[$pos]) {
+                        ++$pos;
+                    }
+                    if ($includeComments) {
+                        $tokens[] = new Token(TokenType::LineComment, substr($input, $start, $pos - $start));
+                    }
+                    continue;
+                }
+
+                // Block comments
+                if ('*' === $c) {
+                    ++$pos; // skip "*"
+                    while ($pos < $len && !('*/' === substr($input, $pos, 2))) {
+                        ++$pos;
+                    }
+                    if ($pos >= $len) {
+                        throw new SyntaxError("Unterminated block comment starting at position $start");
+                    }
+                    if ($includeComments) {
+                        $tokens[] = new Token(TokenType::BlockComment, substr($input, $start, $pos - $start + 2));
+                    }
+                    $pos += 2; // skip "*/"
+                    continue;
+                }
+
+                // Regular expressions
+                while ($pos < $len && '/' !== $input[$pos]) {
+                    if ('\\' === $input[$pos]) {
+                        $pos += 2; // skip escaped character
+                        continue;
+                    }
+                    ++$pos;
+                }
+                ++$pos; // skip closing "/"
+
+                // possible regexp flags after ending slash
+                while ($pos < $len && $input[$pos] >= 'a' && $input[$pos] <= 'z') {
+                    ++$pos; // skip regexp flags
+                }
+
+                if ($pos > $len) {
+                    throw new SyntaxError("Unterminated regular expression starting at position $start");
+                }
+
+                $tokens[] = new Token(TokenType::RegExp, substr($input, $start, $pos - $start));
                 continue;
             }
 

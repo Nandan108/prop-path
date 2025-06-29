@@ -2,8 +2,9 @@
 
 namespace Nandan108\PropPath;
 
-use Nandan108\PropAccess\AccessorRegistry;
+use Nandan108\PropAccess\PropAccess;
 use Nandan108\PropPath\Compiler\Compiler;
+use Nandan108\PropPath\Exception\SyntaxError;
 use Nandan108\PropPath\Support\ThrowMode;
 
 /**
@@ -14,6 +15,7 @@ use Nandan108\PropPath\Support\ThrowMode;
  */
 final class PropPath
 {
+    /** @var array<string, \Closure> */
     public static array $cache = [];
 
     public static function boot(): void
@@ -21,7 +23,7 @@ final class PropPath
         static $booted = false;
 
         if (!$booted) {
-            AccessorRegistry::bootDefaultResolvers();
+            PropAccess::bootDefaultResolvers();
 
             $booted = true;
         }
@@ -35,23 +37,29 @@ final class PropPath
     /**
      * Compile a path or a list of paths into a closure.
      *
-     * @param string|array $paths         a path or array of paths (possibly nested) to compile
-     * @param mixed        $failParseWith a callable to invoke when path parsing fails (throws a SyntaxError by default)
+     * @param string|array                     $paths         a path or array of paths (possibly nested) to compile
+     * @param \Closure(string, ?string): never $failParseWith a callable to invoke when path parsing fails (throws a SyntaxError by default)
+     *
+     * @throws \JsonException in case of invalid JSON encoding of paths
+     * @throws SyntaxError    if a syntax  is invalid
      */
     public static function compile(
         string|array $paths,
-        ?callable $failParseWith = null,
         ThrowMode $defaultThrowMode = ThrowMode::NEVER,
+        ?\Closure $failParseWith = null,
         bool $ignoreCache = false,
         bool $forceCacheRefresh = false,
     ): \Closure {
-        $cacheKey = $defaultThrowMode->value.':'.(is_array($paths) ? hash('xxh3', serialize($paths)) : $paths);
+        $cacheKey = $defaultThrowMode->value.':'.hash(
+            'xxh3',
+            is_array($paths)
+                ? json_encode($paths, JSON_THROW_ON_ERROR)
+                : $paths
+        );
 
         if (!$ignoreCache && !$forceCacheRefresh && isset(self::$cache[$cacheKey])) {
             return self::$cache[$cacheKey];
         }
-
-        self::boot();
 
         // Compile just the path structure
         ['context' => $context, 'extractor' => $extractor] = Compiler::compile(
@@ -60,16 +68,15 @@ final class PropPath
             $defaultThrowMode
         );
 
-        // Here we add a compile step, which resets the roots on the extraction context context
-        $extractor = function (
-            array $roots,
-            ?callable $failEvalWith = null,
-        ) use ($extractor, $context): mixed {
-            // Prepare context by setting roots to be used for extraction
-            $context->prepareForEval($roots, $failEvalWith);
+        // Here we add a compile step, which resets the roots on the extraction context, and possibly sets a custom failure handler.
+        $extractor =
+            /** @param \Closure(string, list<array{string, ThrowMode}>): never $failEvalWith */
+            function (array $roots, ?\Closure $failEvalWith = null) use ($extractor, $context): mixed {
+                // Prepare context by setting roots to be used for extraction
+                $context->prepareForEval($roots, failWith: $failEvalWith);
 
-            return $extractor($roots);
-        };
+                return $extractor($roots);
+            };
 
         if (!$ignoreCache) {
             // Cache the compiled extractor
@@ -77,5 +84,21 @@ final class PropPath
         }
 
         return $extractor;
+    }
+
+    /**
+     * Extract a value from the roots using the given path or paths.
+     *
+     * @param \Closure(string, ?string): never $failParseWith
+     */
+    public static function extract(string|array $paths, array $roots, ThrowMode $throwMode = ThrowMode::NEVER, ?callable $failParseWith = null): mixed
+    {
+        self::boot();
+
+        // Compile the path structure and return the extractor
+        $extractor = self::compile($paths, $throwMode, $failParseWith, ignoreCache: true);
+
+        // Call the extractor with the roots
+        return $extractor($roots);
     }
 }

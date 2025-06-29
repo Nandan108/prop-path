@@ -7,7 +7,7 @@ use Nandan108\PropPath\Support\ThrowMode;
 final class ParsedBracket extends ParsedSegment
 {
     /**
-     * @param array<array<ParsedLiteral|ParsedPath>> $chains
+     * @param list<array<ParsedLiteral|ParsedPath>> $chains
      */
     public function __construct(
         public array $chains,

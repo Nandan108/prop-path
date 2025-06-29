@@ -7,6 +7,8 @@ enum TokenType: string
     case Arrow = '=>';
     case At = '@';
     case Bang = '!';
+    case BlockComment = '/*block*/';
+    case RegExp = '/pattern/';
     case BracketClose = ']';
     case BracketOpen = '[';
     case Colon = ':';
@@ -18,6 +20,7 @@ enum TokenType: string
     case EOF = 'EOF';
     case Identifier = 'IDENT';
     case Integer = 'INTEGER';
+    case LineComment = '//';
     case Qstn = '?';
     case Star = '*';
     case String = 'STRING';

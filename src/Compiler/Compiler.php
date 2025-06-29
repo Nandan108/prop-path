@@ -2,7 +2,7 @@
 
 namespace Nandan108\PropPath\Compiler;
 
-use Nandan108\PropAccess\AccessorRegistry;
+use Nandan108\PropAccess\PropAccess;
 use Nandan108\PropPath\Parser\Parser;
 use Nandan108\PropPath\Parser\TokenStream;
 use Nandan108\PropPath\Segment as Seg;
@@ -14,26 +14,22 @@ final class Compiler
     /**
      * Compiles the given paths into a closure to be used to extract values from a container.
      *
-     * @param mixed $failParseWith
+     * @param \Closure(string, ?string): never $failParseWith
      *
      * @return array{context: ExtractContext, extractor: \Closure}
      */
     public static function compile(
         array|string $paths,
-        ?callable $failParseWith,
-        // ?callable $failEvalWith,
+        ?\Closure $failParseWith,
         ThrowMode $defaultThrowMode,
     ): array {
-        if ('' === $paths) {
-            throw new \InvalidArgumentException('Cannot compile an empty path.');
-        }
+        '' !== $paths or throw new \InvalidArgumentException('Cannot compile an empty path.');
 
         $context = new ExtractContext(
             roots: [], // Empty roots during compilation
             paths: $paths,
             throwMode: $defaultThrowMode,
             failParseWith: $failParseWith,
-            // failWith: $failEvalWith, // Not needed during compilation
         );
 
         $extractor = is_array($paths)
@@ -46,14 +42,24 @@ final class Compiler
         ];
     }
 
+    /**
+     * Compiles an input structure (array of paths) into a closure that extracts values from a container.
+     *
+     * @return \Closure(mixed):mixed
+     */
     private static function compileInputStructure(array $structure, ExtractContext $context): \Closure
     {
         $compiled = [];
 
+        /** @var mixed $paths */
         foreach ($structure as $key => $paths) {
-            $compiled[$key] = (is_array($paths))
-                ? self::compileInputStructure($paths, $context)
-                : self::compileInputString($paths, $context);
+            '' !== $paths or throw new \InvalidArgumentException('Cannot compile an empty path.');
+
+            $compiled[$key] = match (true) {
+                is_array($paths)  => self::compileInputStructure($paths, $context),
+                is_string($paths) => self::compileInputString($paths, $context),
+                default           => throw new \InvalidArgumentException('Invalid path type: '.get_debug_type($paths)),
+            };
         }
 
         return function (mixed $container) use (&$compiled): array {
@@ -61,6 +67,7 @@ final class Compiler
             /** @psalm-suppress UnnecessaryVarAnnotation */
             /** @var \Closure $fn */
             foreach ($compiled as $key => $fn) {
+                /** @psalm-var mixed */
                 $output[$key] = $fn($container);
             }
 
@@ -74,7 +81,7 @@ final class Compiler
      *
      * @return array<Seg\ParsedLiteral|Seg\ParsedPath>
      */
-    public static function getAST(string $path, ExtractContext $context): array
+    public static function getAst(string $path, ExtractContext $context): array
     {
         $ts = TokenStream::fromString($path);
 
@@ -83,7 +90,7 @@ final class Compiler
 
     private static function compileInputString(string $path, ExtractContext $context): \Closure
     {
-        $AST = self::getAST($path, $context);
+        $AST = self::getAst($path, $context);
         $result = self::compileChain($AST, $context);
 
         return $result;
@@ -92,7 +99,7 @@ final class Compiler
     /**
      * @param array<Seg\ParsedPath|Seg\ParsedLiteral> $paths
      */
-    public static function compileChain(array $paths, ExtractContext $context, bool $preserveKey = false, bool $isRoot = true): \Closure
+    public static function compileChain(array $paths, ExtractContext $context, bool $preserveKey = false, ?int $bracketElementNum = null): \Closure
     {
         $compiledPaths = [];
 
@@ -132,12 +139,12 @@ final class Compiler
             }
         }
 
-        return function (mixed $container) use ($context, $compiledPaths, $isRoot): mixed {
+        return function (mixed $container) use ($context, $compiledPaths, $bracketElementNum): mixed {
             $keyStack = $context->keyStack;
 
             /** @psalm-suppress UnnecessaryVarAnnotation */
             /** @var \Closure $compiledPath */
-            foreach ($compiledPaths as [$key, $compiledPath]) {
+            foreach ($compiledPaths as $i => [$key, $compiledPath]) {
                 // make sure we reset the context's $keyStack before each evaluating each path
                 $context->keyStack = $keyStack;
                 $result = $compiledPath($container);
@@ -145,13 +152,17 @@ final class Compiler
                 // if return result is non-null, we return it
                 if (null !== $result) {
                     // root chain just returns final result
-                    if ($isRoot) {
+                    if (null === $bracketElementNum) {
                         return $result;
                     }
 
                     // If the key is a closure, we resolve it now
                     if ($key instanceof \Closure) {
+                        /** @psalm-var mixed */
                         $key = $key($container);
+                        if (!(is_scalar($key) || $key instanceof \Stringable)) {
+                            $context->fail('of type '.get_debug_type($key)." is not a valid key! (bracket segment $bracketElementNum, chain link $i)");
+                        }
                     }
 
                     // If not $isRoot (within bracket), we return a key too
@@ -159,9 +170,7 @@ final class Compiler
                 }
             }
 
-            return $isRoot
-                ? null
-                : [null, null];
+            return null === $bracketElementNum ? null : [null, null];
         };
     }
 
@@ -175,11 +184,11 @@ final class Compiler
 
         // Build a pipeline of closures, each segment operating on the previous value
         foreach ($segments as $i => $seg) {
-            if ($seg instanceof Seg\ParsedRecursive) {
+            if ($seg instanceof Seg\ParsedOnEach) {
                 $nextSegments = array_slice($segments, (int) $i + 1);
                 $downstream = $nextSegments ? self::compilePath($nextSegments, $context) : null;
 
-                return self::compileRecursiveSegment($seg, upstream: $pipeline ?? null, context: $context, downStream: $downstream);
+                return self::compileOnEachSegment($seg, upstream: $pipeline ?? null, context: $context, downStream: $downstream);
             }
 
             $pipeline = self::compileSegment($seg, $context, upstream: $pipeline ?? null);
@@ -197,6 +206,7 @@ final class Compiler
             $seg instanceof Seg\ParsedFlatten => self::compileFlattenSegment($seg, $upstream, $context),
             $seg instanceof Seg\ParsedSlice   => self::compileSliceSegment($seg, $upstream, $context),
             $seg instanceof Seg\ParsedBracket => self::compileBracketSegment($seg, $upstream, $context),
+            $seg instanceof Seg\ParsedRegExp  => self::compileRegExpSegment($seg, $upstream, $context),
             // default will never happen, but let's keep static analysis happy
             default                           => throw new \InvalidArgumentException('Invalid segment type: '.get_class($seg)),
         };
@@ -204,34 +214,25 @@ final class Compiler
 
     private static function compileFlattenSegment(Seg\ParsedFlatten $seg, ?\Closure $upstream, ExtractContext $context): \Closure
     {
-        $getItems = function (mixed $value, array $throwOn, Seg\ParsedFlatten $seg, ExtractContext $context): mixed {
-            if (is_array($value)) {
-                return $value; // if it's an array, we can use it directly
-            }
-            $getterMap = AccessorRegistry::getGetterMap($value, throwOnNotFound: false);
+        $getItems = function (mixed $container, array $throwOn, Seg\ParsedFlatten $seg, ExtractContext $context): mixed {
+            $values = null !== $container && !is_array($container)
+                ? (is_array($container) || is_object($container)
+                    ? PropAccess::getValueMap($container, throwOnNotFound: false)
+                    : null)
+                : $container;
 
-            if (is_array($getterMap)) {
-                $items = [];
-                foreach ($getterMap as $key => $getter) {
-                    $items[$key] = $getter($value);
-                }
-
-                return $items;
+            if (null === $values && in_array($seg->mode, $throwOn)) {
+                $context->fail('Expected a container, got: '.get_debug_type($container));
             }
 
-            if (in_array($seg->mode, $throwOn)) {
-                $context->fail('Expected a container, got: '.get_debug_type($value));
-            }
-
-            return $value;
+            return $values;
         };
 
-        return function (array|object $data) use ($seg, $upstream, $context, $getItems): mixed {
+        return function (mixed $data) use ($seg, $upstream, $context, $getItems): mixed {
+            /** @psalm-var mixed */
             $value = $upstream ? $upstream($data) : $data;
 
-            $throwOn = [ThrowMode::NOT_A_CONTAINER, ThrowMode::NOT_CONTAINING_CONTAINERS];
-
-            $items = $getItems($value, $throwOn, $seg, $context);
+            $items = $getItems($value, [ThrowMode::MISSING_KEY, ThrowMode::NULL_VALUE], $seg, $context);
 
             if (!is_array($items)) {
                 // No need to throw an "Expected a container" error, it would already
@@ -239,29 +240,29 @@ final class Compiler
                 return $items;
             }
 
+            /** @var array<string|int, mixed> */
             $flattenedOutput = [];
-            $subContainersFound = false;
 
+            /** @var mixed $outerItem */
             foreach ($items as $outerKey => $outerItem) {
                 // Merge items
-                $subItems = $getItems($outerItem, [], $seg, $context);
+                $subItems = $getItems($outerItem, [], $seg, $context)
+                    ?? [$outerKey => $outerItem];
 
-                if (is_array($subItems)) {
-                    $subContainersFound = true;
-                    foreach ($subItems as $innerKey => $innerItem) {
-                        $seg->preserveKeys
-                            ? $flattenedOutput[$innerKey] = $innerItem
-                            : $flattenedOutput[] = $innerItem;
+                /** @var mixed $innerItem */
+                foreach ($subItems as $innerKey => $innerItem) {
+                    if ($seg->preserveKeys) {
+                        /** @psalm-var mixed */
+                        $flattenedOutput[$innerKey] = $innerItem;
+                    } else {
+                        /** @psalm-var mixed */
+                        $flattenedOutput[] = $innerItem;
                     }
-                } else {
-                    $seg->preserveKeys
-                        ? $flattenedOutput[$outerKey] = $outerItem
-                        : $flattenedOutput[] = $outerItem;
                 }
             }
 
-            if (!$subContainersFound && ThrowMode::NOT_CONTAINING_CONTAINERS === $seg->mode) {
-                $context->fail('does not contain a sub-container to be flattened');
+            if (ThrowMode::NULL_VALUE === $seg->mode) {
+                $flattenedOutput or $context->fail("flattened by `$seg->raw` is empty");
             }
 
             $context->push($seg->raw);
@@ -270,21 +271,127 @@ final class Compiler
         };
     }
 
-    private static function compileRecursiveSegment(Seg\ParsedRecursive $seg, ?\Closure $upstream, ExtractContext $context, ?\Closure $downStream): \Closure
+    // Compile a RegExp key-filtering segment.
+    // This segment is intended to filter keys of an array or object using a regular expression.
+    private static function compileRegExpSegment(Seg\ParsedRegExp $seg, ?\Closure $upstream, ExtractContext $context): \Closure
     {
-        return function (mixed $upsteamContainer) use ($seg, $upstream, $context, $downStream): array {
+        // Not implemented yet, but we can return a placeholder for now.
+        return function (mixed $upstreamContainer) use ($seg, $upstream, $context): mixed {
+            /** @psalm-var mixed */
+            $originalContainer = $upstream ? $upstream($upstreamContainer) : $upstreamContainer;
+            $mode = $seg->mode ?? $context->currentMode();
+            $output = [];
+            $container = null;
+            $containerIsGetterMap = false;
+
+            // attempt to convert the container to an array if it is not already one
+            if (is_object($originalContainer)) {
+                $container = PropAccess::getGetterMap($originalContainer, throwOnNotFound: false);
+                $containerIsGetterMap = true;
+            } elseif (is_array($originalContainer)) {
+                $container = $originalContainer;
+            }
+
+            // If $originalContainer is not an array or object, $container will be null.
+            // We could also have empty containers, in which there's nothing to filter.
+            // this according to the ThrowMode.
+            $errorMsg = match ($container) {
+                null    => 'can\'t filter within '.get_debug_type($originalContainer),
+                []      => 'requires keys to filter, but '.get_debug_type($originalContainer).' is empty',
+                default => null,
+            };
+            if ($errorMsg) {
+                $context->push($seg->raw);
+
+                return ThrowMode::NEVER === $mode
+                    ? $container
+                    : $context->fail($errorMsg);
+            }
+            /** @var non-empty-array $container */
+
+            /** @psalm-suppress PossibleRawObjectIteration */
+            if ($seg->filterKeys) {
+                // Filter out keys that don't match the regular expression
+                /** @var mixed $value */
+                foreach ($container as $key => $value) {
+                    if (preg_match($seg->value, (string) $key)) {
+                        /** @psalm-var mixed */
+                        $output[$key] = $value;
+                    }
+                }
+            } else {
+                if ($containerIsGetterMap) {
+                    // If the container is a getter map, we need to resolve the values first
+                    /** @var array<string, Closure(mixed):mixed> $container */
+                    $resolvedValues = PropAccess::resolveValues($container, $originalContainer);
+                    $container = $resolvedValues;
+                    $containerIsGetterMap = false; // Now we have a regular array
+                }
+                // Filter out non-(string|Stringable|numeric) values, and those that don't match the regular expression
+                /** @var mixed $value */
+                foreach ($container as $key => $value) {
+                    if ((is_string($value) || is_numeric($value) || $value instanceof \Stringable)
+                        && preg_match($seg->value, (string) $value)) {
+                        $output[$key] = $value;
+                    }
+                }
+            }
+
+            // If the output is empty and mode is NULL_VALUE, we throw an error
+            if (!$output && ThrowMode::NULL_VALUE === $mode) {
+                $context->push($seg->raw);
+                $context->fail('RegExp failed to match any '.($seg->filterKeys ? 'key' : 'value').' in '.get_debug_type($originalContainer));
+            }
+
+            // If we got a getter map from PropAccess, we resolve the values now.
+            if ($containerIsGetterMap) {
+                /** @var array<string, Closure(mixed):mixed> $output */
+                return PropAccess::resolveValues($output, $originalContainer);
+            }
+
+            return $output; // return the filtered output
+        };
+    }
+
+    private static function compileOnEachSegment(Seg\ParsedOnEach $seg, ?\Closure $upstream, ExtractContext $context, ?\Closure $downStream): \Closure
+    {
+        return function (mixed $upsteamContainer) use ($seg, $upstream, $context, $downStream): ?array {
+            /** @psalm-var mixed */
             $container = $upstream ? $upstream($upsteamContainer) : $upsteamContainer;
             $results = [];
 
-            $context->push(1 === $seg->depth ? '*' : '**', $seg->mode);
+            $context->push(mode: $seg->mode);
+
+            if (null === $container || is_scalar($container)) {
+                if (ThrowMode::NEVER === $context->currentMode()) {
+                    return null;
+                } else {
+                    $context->fail(sprintf('of type %s cannot be iterated over by `%s`',
+                        get_debug_type($container),
+                        $seg->raw)
+                    );
+                }
+            }
+
+            $context->push($seg->raw);
             $stack = $context->keyStack;
 
             self::walkRecursive($container, $results, $seg->depth - 1, $seg->preserveKey, $context);
 
+            if (ThrowMode::NEVER !== $context->currentMode() && empty($results)) {
+                // If the mode is NULL_VALUE, we throw an error if the output is empty
+                $context->fail('onEach segment is empty');
+            }
+
             $output = [];
-            foreach ($results as $k => $v) {
+            /** @var array{0: array-key, 1:mixed} $result */
+            foreach ($results as $result) {
+                /** @var mixed $v */
+                [$k, $v] = $result;
+
                 // If a downstream closure is provided, apply it to each result
                 if ($downStream) {
+                    /** @psalm-var mixed */
                     $v = $downStream($v);
                     $context->keyStack = $stack; // reset context stack level after each downstream call
                 }
@@ -292,11 +399,18 @@ final class Compiler
                 if (null !== $v) {
                     // If the downstream closure returns a value, replace the result
                     if ($seg->preserveKey) {
+                        /** @psalm-var mixed */
                         $output[$k] = $v;
                     } else {
+                        /** @psalm-var mixed */
                         $output[] = $v; // reindex if preserveKey is false
                     }
                 }
+            }
+
+            if (ThrowMode::NULL_VALUE === $context->currentMode() && empty($output)) {
+                // If the mode is NULL_VALUE, we throw an error if the output is empty
+                $context->fail('onEach segment returned no results');
             }
 
             return $output;
@@ -321,27 +435,35 @@ final class Compiler
         string|int|null $currentKey = null,
     ): void {
         $context->push(null !== $currentKey ? (string) $currentKey : null);
-
+        // TODO: dedupe code by use of AccessorProxy
         if (is_array($node) || $node instanceof \Traversable) {
+            /** @var mixed $v */
             foreach ($node as $k => $v) {
+                if (null === $v) {
+                    continue;
+                }
                 if ($preserveKey) {
-                    $results[$k] = $v;
+                    $results[] = [$k, $v];
                 } else {
-                    $results[] = $v; // Add current value
+                    $results[] = [null, $v]; // Add current value
                 }
                 if ($depth) { // Continue recursing if depth not exhausted
                     self::walkRecursive($v, $results, $depth - 1, $preserveKey, $context, $k);
                 }
             }
         } elseif (is_object($node)) {
-            $getterMap = AccessorRegistry::getGetterMap($node);
+            $getterMap = PropAccess::getGetterMap($node);
             /** @var callable(mixed)[] $getterMap */
             foreach ($getterMap as $k => $getter) {
+                /** @psalm-var mixed */
                 $v = $getter($node);
+                if (null === $v) {
+                    continue;
+                }
                 if ($preserveKey) {
-                    $results[$k] = $v;
+                    $results[] = [$k, $v];
                 } else {
-                    $results[] = $v; // Add current value
+                    $results[] = [null, $v]; // Add current value
                 }
                 if ($depth) {
                     self::walkRecursive($v, $results, $depth - 1, $preserveKey, $context, $k);
@@ -379,6 +501,7 @@ final class Compiler
         /** @var \Closure(mixed): array{mixed, string|int, ExtractContext} $setup */
         $setup = function (mixed $container) use ($seg, $upstream, $context): array {
             if ($upstream) {
+                /** @psalm-var mixed $container */
                 $container = $upstream($container);
             }
             $context->push((string) $seg->key, $seg->mode);
@@ -394,6 +517,7 @@ final class Compiler
         /** @psalm-suppress MissingClosureReturnType */
         return match ($mode) {
             ThrowMode::MISSING_KEY => function (mixed $parentContainer) use ($setup) {
+                /** @var mixed $container */
                 [$container, $key, $context] = $setup($parentContainer);
 
                 if (is_array($container)) {
@@ -414,7 +538,7 @@ final class Compiler
                 }
 
                 if (is_object($container)) {
-                    $getter = AccessorRegistry::getGetterMap($container, (string) $key)[$key] ?? null;
+                    $getter = PropAccess::getGetterMap($container, (string) $key)[$key] ?? null;
                     if (!$getter) {
                         $context->fail('not accessible on '.get_class($container));
                     }
@@ -426,18 +550,11 @@ final class Compiler
             },
 
             ThrowMode::NULL_VALUE => function (mixed $container) use ($setup) {
+                /** @var mixed $container */
                 [$container, $key, $context] = $setup($container);
 
-                if (is_array($container)) {
+                if (is_array($container) || $container instanceof \ArrayAccess) {
                     if (!isset($container[$key])) {
-                        $context->fail('is null but required');
-                    }
-
-                    return $container[$key];
-                }
-                if ($container instanceof \ArrayAccess) {
-                    $value = $container[$key] ?? null;
-                    if (null === $value) {
                         $context->fail('is null but required');
                     }
 
@@ -445,10 +562,11 @@ final class Compiler
                 }
 
                 if (is_object($container)) {
-                    $getter = AccessorRegistry::getGetterMap($container, [$key], true)[$key] ?? null;
+                    $getter = PropAccess::getGetterMap($container, [$key], true)[$key] ?? null;
                     if (!$getter) {
                         $context->fail('not accessible on '.get_class($container));
                     }
+                    /** @psalm-var mixed $value */
                     $value = $getter($container);
                     if (null === $value) {
                         $context->fail('is null but required');
@@ -459,6 +577,7 @@ final class Compiler
             },
             // ThrowMode::NEVER
             default => function (mixed $container) use ($setup) {
+                /** @var mixed $container */
                 [$container, $key] = $setup($container);
 
                 if (is_array($container)) {
@@ -470,7 +589,7 @@ final class Compiler
                 }
 
                 if (is_object($container)) {
-                    $getter = AccessorRegistry::getGetterMap($container, [$key], true)[$key] ?? null;
+                    $getter = PropAccess::getGetterMap($container, [$key], true)[$key] ?? null;
 
                     return $getter ? $getter($container) : null;
                 }
@@ -487,6 +606,7 @@ final class Compiler
             $end = $seg->end;
 
             if ($upstream) {
+                /** @psalm-var mixed $container */
                 $container = $upstream($container);
             }
             $context->push($seg->raw);
@@ -552,8 +672,10 @@ final class Compiler
                     /** @var \ArrayAccess $container */
                     if ($container->offsetExists($k)) {
                         if ($seg->preserveKey) {
+                            /** @psalm-var mixed */
                             $slice[$k] = $container[$k] ?? null;
                         } else {
+                            /** @psalm-var mixed */
                             $slice[] = $container[$k] ?? null;
                         }
                     }
@@ -568,6 +690,7 @@ final class Compiler
                     return $fail("slice `$seg->raw` is missing some keys: expected $length but got $count");
                 }
             } elseif (ThrowMode::NULL_VALUE === $throwMode) {
+                /** @var mixed $v */
                 foreach ($slice as $k => $v) {
                     if (null === $v) {
                         return $fail("slice `$seg->raw` contains a null value at key `$k`");
@@ -586,8 +709,8 @@ final class Compiler
         $context->push(mode: $throwMode);
 
         $compiledBracketParts = [];
-        foreach ($seg->chains as $chain) {
-            $extractor = self::compileChain($chain, $context, $seg->preserveKey, isRoot: false);
+        foreach ($seg->chains as $bracketElementNum => $chain) {
+            $extractor = self::compileChain($chain, $context, $seg->preserveKey, $bracketElementNum);
             $compiledBracketParts[] = $extractor;
         }
 
@@ -595,28 +718,37 @@ final class Compiler
 
         // bracket segment (multi)
         return function (mixed $upstreamContainer) use ($seg, $context, $compiledBracketParts, $upstream) {
+            /** @psalm-var mixed */
             $container = $upstream
                 ? $upstream($upstreamContainer)
                 : $upstreamContainer; // upstream is optional, if not provided, we use the upstreamContainer directly
 
             $bracket = [];
             $keyStack = $context->keyStack;
+            $hasExplicitKey = false;
             foreach ($compiledBracketParts as $compiledChainExtractor) {
+                /** @var ?array{0: ?array-key, 1: mixed} $result */
                 $result = $compiledChainExtractor($container);
                 $context->keyStack = $keyStack; // reset context stack level after each segment
                 if ($result) {
+                    /** @var mixed $value */
                     [$key, $value] = $result;
 
                     // no need to catch exceptions here, they're already handled in the compiled chain
-                    null === $key
-                        ? ($bracket[] = $value)
-                        : ($bracket[$key] = $value);
+                    if (null === $key) {
+                        /** @psalm-var mixed */
+                        $bracket[] = $value;
+                    } else {
+                        /** @psalm-var mixed */
+                        $bracket[$key] = $value;
+                        $hasExplicitKey = true;
+                    }
                 }
             }
 
             $context->push($seg->raw);
 
-            return 1 === count($bracket) && array_is_list($bracket)
+            return 1 === count($bracket) && !$hasExplicitKey
                 ? reset($bracket) // if there's only one item in the bracket and preserveKey is false, return it directly
                 : $bracket; // otherwise, return the whole bracket array
         };

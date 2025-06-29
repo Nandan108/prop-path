@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        php: [8.1, 8.2, 8.3, 8.4]
+        include:
+          - php: 8.2
+            run-cs-fixer: true
+            run-psalm: true
+    name: PHP ${{ matrix.php }} Tests
+
+    steps:
+      - uses: actions/checkout@main
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer, psalm
+          extensions: xdebug
+          coverage: xdebug
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress
+
+      - name: Run PHP-CS-Fixer (dry run)
+        if: matrix.run-cs-fixer == 'true'
+        run: vendor/bin/php-cs-fixer fix --dry-run --diff --verbose --allow-risky=yes
+
+      - name: Run PHPUnit
+        run: vendor/bin/phpunit --coverage-clover=coverage.xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          fail_ci_if_error: true # optional (default = false)
+          files: ./coverage1.xml,./coverage2.xml # optional
+          name: codecov-umbrella # optional
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true # optional (default = false)
+
+      - name: Run Psalm
+        if: matrix.run-psalm == 'true'
+        run: vendor/bin/psalm

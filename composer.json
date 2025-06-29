@@ -21,13 +21,13 @@
   ],
   "require": {
     "php": "^8.1",
-    "nandan108/prop-access": "^0.1.0"
+    "nandan108/prop-access": "^0.4.0"
   },
   "require-dev": {
     "friendsofphp/php-cs-fixer": "^3.75",
     "phpunit/phpunit": "^10.0",
     "vimeo/psalm": "^6.10",
-    "nunomaduro/collision": "^8.5"
+    "nunomaduro/collision": "^6.4"
   },
   "scripts": {
     "cs-fix": "./vendor/bin/php-cs-fixer fix --allow-risky=yes --diff",

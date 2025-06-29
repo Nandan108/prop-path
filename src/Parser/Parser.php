@@ -30,9 +30,16 @@ final class Parser
 
         while (!$ts->eof()) {
             $path = self::parseSinglePath($ts, $context, $inBraket);
+
             if ($ts->consume([TokenType::Arrow])) {
                 $customKey = $path instanceof Seg\ParsedLiteral ? (string) $path->value : $path;
                 $path = self::parseSinglePath($ts, $context, $inBraket, $customKey);
+            } else {
+                // a custom key given by the user, e.g. `"customKey" => somePath` on one path
+                // will but used for all subsequent paths in the chain unless overridden by '@' or
+                // until changed by a new custom key '=>'.
+                // This allows for a natural syntax like `somekey => foo ?? bar ?? baz`.
+                $path->key ??= $customKey ?? null;
             }
             $paths[] = $path;
 
@@ -50,18 +57,24 @@ final class Parser
      */
     private static function parseSinglePath(TokenStream $ts, ExtractContext $context, bool $inBracket, Seg\ParsedPath|string|null $customKey = null): Seg\ParsedPath|Seg\ParsedLiteral
     {
-        $segments = [];
+        $pathEndTokens = [TokenType::DblQstn, TokenType::Comma, TokenType::BracketClose, TokenType::Arrow, TokenType::EOF];
 
+        // A path may be composed of a single integer or literal string value,
+        // in which case this is the value that will be used (results in a "literal" segment)
+        if ($token = $ts->consume([TokenType::String])[0] ?? null) {
+            // If there's no other segment after this, the path is just a literal value.
+            if ($ts->peekIsOneOf(...$pathEndTokens)) {
+                $literal = TokenType::String === $token->type ? $token->value : (int) $token->value;
+
+                return new Seg\ParsedLiteral($literal, $customKey ?? null);
+            }
+            // If there are more segments, we rewind the stream to parse the path normally
+            $ts->rewind(1);
+        }
+
+        $segments = [];
         $i = $ts->getIndex();
         $getRaw = fn (): string => $ts->valueSince($i);
-
-        // A path may be composed of a single integer or literal string value, in which case this is the
-        // value that will be used.
-        if ($token = $ts->consume([TokenType::String])[0] ?? null) {
-            $literal = TokenType::String === $token->type ? $token->value : (int) $token->value;
-
-            return new Seg\ParsedLiteral($literal, $customKey ?? null);
-        }
 
         // Dollar token indicates root segment
         if ($ts->consume([TokenType::Dollar])) {
@@ -69,12 +82,14 @@ final class Parser
             $ident = $ts->consume([TokenType::Identifier])[0] ?? null;
 
             // root segment is always the first one, and it can be:
-            // - "$foo.": explicit root "foo"
-            // - "$.": default root (whichever root is first in $context->roots at evaluation time)
+            // - "$foo": explicit root "foo"
+            // - "$.x": default root (whichever root is first in $context->roots at evaluation time)
             $segments[] = new Seg\ParsedRoot($ident?->value);
 
-            // then a dot, regardless of whether it's a root alias or an implicit default root
-            $ts->expect(TokenType::Dot);
+            // allow root-only paths, e.g. "$" or "$foo"
+            if ($ts->peekIsOneOf(...$pathEndTokens)) {
+                return new Seg\ParsedPath($segments, key: null, raw: $getRaw());
+            }
         }
         // In case no root was declared, but we're in a root chain (not within a bracket segment)
         // then an implicit default root must be inserted
@@ -85,6 +100,8 @@ final class Parser
         $preservedKey = null;
 
         while (!$ts->eof()) {
+            $ts->consume([TokenType::Dot]);
+
             $segments[] = $segment = self::parseSegment($ts, $context);
             if ($segment instanceof Seg\ParsedKey) {
                 if ($segment->preserveKey) {
@@ -95,11 +112,9 @@ final class Parser
                 }
             }
 
-            if ($ts->peekIsOneOf(TokenType::DblQstn, TokenType::Comma, TokenType::BracketClose, TokenType::Arrow)) {
+            if ($ts->peekIsOneOf(...$pathEndTokens)) {
                 break;
             }
-
-            $ts->consume([TokenType::Dot]);
         }
 
         return new Seg\ParsedPath(
@@ -116,8 +131,9 @@ final class Parser
      */
     private static function parseSegment(TokenStream $ts, ExtractContext $context): Seg\ParsedSegment
     {
-        $mode = self::parseModePrefix($ts, $context);
         $i = $ts->getIndex();
+
+        $mode = self::parseModePrefix($ts, $context);
         $getRaw = fn (): string => $ts->valueSince($i);
 
         // check for preserve keys '@' flag
@@ -132,15 +148,17 @@ final class Parser
 
         // Handle standalone star segment
         if ($ts->consume([TokenType::Star])) {
-            $depth = 1;
-            while ($ts->consume([TokenType::Star])) {
-                ++$depth;
+            if ($ts->consume([TokenType::Star])) {
+                $depth = 255;
+            } else {
+                $depth = ($ts->consume([TokenType::Integer])[0] ?? null)?->value ?? 1;
             }
 
-            return new Seg\ParsedRecursive(
-                depth: $depth > 1 ? -1 : 1, // '**' means infinite
+            return new Seg\ParsedOnEach(
+                depth: (int) $depth, // '**' means 255 which is ~= infinite
                 mode: $mode,
                 preserveKey: $preserveKey,
+                raw: $getRaw(),
             );
         }
 
@@ -178,14 +196,15 @@ final class Parser
             return $newSlice(null, null);
         }
 
+        // Flatten segment
         if ($ts->consume([TokenType::Tilde])) {
-            $flattenThrowMode = match ($mode) {
-                ThrowMode::MISSING_KEY => ThrowMode::NOT_A_CONTAINER,
-                ThrowMode::NULL_VALUE  => ThrowMode::NOT_CONTAINING_CONTAINERS,
-                default                => ThrowMode::NEVER,
-            };
+            return new Seg\ParsedFlatten($mode, $getRaw(), preserveKeys: $preserveKey);
+        }
 
-            return new Seg\ParsedFlatten($flattenThrowMode, $getRaw(), preserveKeys: $preserveKey);
+        // RegExp segment
+        if ($regExp = $ts->consume([TokenType::RegExp])[0] ?? null) {
+            /** @var non-empty-string $regExp->value */
+            return new Seg\ParsedRegExp($regExp->value, $getRaw(), $mode, $preserveKey);
         }
 
         // if we reach here, it means we have an invalid segment
@@ -198,7 +217,7 @@ final class Parser
     /**
      * Parses a bracket expression into an array of fallback chains (one per comma).
      *
-     * @return array<array<Seg\ParsedLiteral|Seg\ParsedPath>> a list of fallback chains
+     * @return list<array<Seg\ParsedLiteral|Seg\ParsedPath>> a list of fallback chains
      */
     private static function parseBracket(TokenStream $ts, ExtractContext $context): array
     {
@@ -208,16 +227,20 @@ final class Parser
         while (!$ts->eof()) {
             $chains[] = self::parseChain($ts, $context, true);
 
-            // if we find a closing bracket, that's the end of the bracket expression
+            // if we find a closing bracket (before a comma), that's the end of the bracket expression
             if ($ts->consume([TokenType::BracketClose])) {
                 break;
             }
 
-            // consume the natural separator within bracket.
+            // consume the natural separator within bracket: the comma
             $ts->consume([TokenType::Comma]);
-        }
 
-        $chains or $context->failParse($ts, 'invalid empty bracket expression');
+            // allow a trailing comma before the closing bracket:
+            // if we find a closing bracket (after a comma), that's also the end of the bracket expression
+            if ($ts->consume([TokenType::BracketClose])) {
+                break;
+            }
+        }
 
         return $chains;
     }
