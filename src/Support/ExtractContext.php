@@ -34,6 +34,7 @@ final class ExtractContext
      * @var list<array{string, ThrowMode}>
      */
     public array $keyStack = [];
+    public array $valueStack = [];
 
     public array $roots;
 
@@ -112,11 +113,39 @@ final class ExtractContext
         }
     }
 
-    public function push(?string $key = null, ?ThrowMode $mode = null): static
+    /**
+     * Push a key or mode onto the key stack, or a value on the value stack.
+     *
+     * @template T
+     *
+     * @param T $value
+     *
+     * @return T
+     */
+    public function push(?string $key = null, ?ThrowMode $mode = null, mixed $value = null): mixed
     {
-        array_push($this->keyStack, [$key ?? '', $mode ?? $this->getCurrentMode()]);
+        if (null !== $key || null !== $mode) {
+            array_push($this->keyStack, [$key ?? '', $mode ?? $this->getCurrentMode()]);
+        }
 
-        return $this;
+        // If a value is provided, push it onto the value stack.
+        if (func_num_args() >= 3) {
+            array_unshift($this->valueStack, $value);
+        }
+
+        /** @psalm-var T */
+        return $value;
+    }
+
+    /**
+     * Reset the key and value stacks.
+     *
+     * @param list<list{string, ThrowMode}> $keyStack
+     */
+    public function resetStack(array $keyStack = [], array $valueStack = []): void
+    {
+        $this->keyStack = $keyStack;
+        $this->valueStack = $valueStack;
     }
 
     /**
@@ -128,11 +157,26 @@ final class ExtractContext
         return $this->keyStack ? end($this->keyStack)[1] : $this->throwMode;
     }
 
-    public function pop(): static
+    /**
+     * Pop both:
+     * - the last key from the key stack
+     * - the last value from the value stack
+     */
+    public function pop(bool $key = false, bool $value = false): void
     {
-        array_pop($this->keyStack);
+        if (!$key && !$value) {
+            $key = $value = true;
+        }
 
-        return $this;
+        if ($key) {
+            array_pop($this->keyStack);
+        }
+
+        // Popping the value stack only makes sense during evaluation, but
+        // doesn't cost much to do it here.
+        if ($value) {
+            array_shift($this->valueStack);
+        }
     }
 
     public function currentMode(): ThrowMode

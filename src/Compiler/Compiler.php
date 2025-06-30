@@ -141,12 +141,14 @@ final class Compiler
 
         return function (mixed $container) use ($context, $compiledPaths, $bracketElementNum): mixed {
             $keyStack = $context->keyStack;
+            $valueStack = $context->valueStack;
 
             /** @psalm-suppress UnnecessaryVarAnnotation */
             /** @var \Closure $compiledPath */
-            foreach ($compiledPaths as $i => [$key, $compiledPath]) {
-                // make sure we reset the context's $keyStack before each evaluating each path
-                $context->keyStack = $keyStack;
+            foreach ($compiledPaths as [$key, $compiledPath]) {
+                // make sure we reset the context's stacks before each evaluating each path
+                $context->resetStack($keyStack, $valueStack);
+
                 $result = $compiledPath($container);
 
                 // if return result is non-null, we return it
@@ -158,19 +160,26 @@ final class Compiler
 
                     // If the key is a closure, we resolve it now
                     if ($key instanceof \Closure) {
+                        $context->resetStack($keyStack, $valueStack);
+
                         /** @psalm-var mixed */
                         $key = $key($container);
+
+                        // It's not the chain's job to throw, so ignore invalid keys
                         if (!(is_scalar($key) || $key instanceof \Stringable)) {
-                            $context->fail('of type '.get_debug_type($key)." is not a valid key! (bracket segment $bracketElementNum, chain link $i)");
+                            $key = null;
                         }
+                        $hasExplicitKey = true;
+                    } else {
+                        $hasExplicitKey = null !== $key;
                     }
 
                     // If not $isRoot (within bracket), we return a key too
-                    return [$key, $result];
+                    return [$key, $result, $hasExplicitKey];
                 }
             }
 
-            return null === $bracketElementNum ? null : [null, null];
+            return null === $bracketElementNum ? null : [null, null, false];
         };
     }
 
@@ -201,12 +210,13 @@ final class Compiler
     {
         return match (true) {
             // if the segment is a ParsedKey, ParsedSlice, or ParsedBracket, compile it accordingly
-            $seg instanceof Seg\ParsedRoot    => self::compileRootSegment($seg, $context),
-            $seg instanceof Seg\ParsedKey     => self::compileKeySegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedFlatten => self::compileFlattenSegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedSlice   => self::compileSliceSegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedBracket => self::compileBracketSegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedRegExp  => self::compileRegExpSegment($seg, $upstream, $context),
+            $seg instanceof Seg\ParsedRoot     => self::compileRootSegment($seg, $context),
+            $seg instanceof Seg\ParsedKey      => self::compileKeySegment($seg, $upstream, $context),
+            $seg instanceof Seg\ParsedFlatten  => self::compileFlattenSegment($seg, $upstream, $context),
+            $seg instanceof Seg\ParsedSlice    => self::compileSliceSegment($seg, $upstream, $context),
+            $seg instanceof Seg\ParsedBracket  => self::compileBracketSegment($seg, $upstream, $context),
+            $seg instanceof Seg\ParsedRegExp   => self::compileRegExpSegment($seg, $upstream, $context),
+            $seg instanceof Seg\ParsedStackRef => self::compileStackRefSegment($seg, $upstream, $context),
             // default will never happen, but let's keep static analysis happy
             default                           => throw new \InvalidArgumentException('Invalid segment type: '.get_class($seg)),
         };
@@ -237,7 +247,7 @@ final class Compiler
             if (!is_array($items)) {
                 // No need to throw an "Expected a container" error, it would already
                 // be thrown by $getItems if the mode is not ThrowMode::NEVER.
-                return $items;
+                return $context->push(value: $items);
             }
 
             /** @var array<string|int, mixed> */
@@ -267,7 +277,7 @@ final class Compiler
 
             $context->push($seg->raw);
 
-            return $flattenedOutput;
+            return $context->push(value: $flattenedOutput);
         };
     }
 
@@ -303,9 +313,9 @@ final class Compiler
             if ($errorMsg) {
                 $context->push($seg->raw);
 
-                return ThrowMode::NEVER === $mode
+                return $context->push(value: ThrowMode::NEVER === $mode
                     ? $container
-                    : $context->fail($errorMsg);
+                    : $context->fail($errorMsg));
             }
             /** @var non-empty-array $container */
 
@@ -346,10 +356,10 @@ final class Compiler
             // If we got a getter map from PropAccess, we resolve the values now.
             if ($containerIsGetterMap) {
                 /** @var array<string, Closure(mixed):mixed> $output */
-                return PropAccess::resolveValues($output, $originalContainer);
+                return $context->push(value: PropAccess::resolveValues($output, $originalContainer));
             }
 
-            return $output; // return the filtered output
+            return $context->push(value: $output); // return the filtered output
         };
     }
 
@@ -374,7 +384,9 @@ final class Compiler
             }
 
             $context->push($seg->raw);
-            $stack = $context->keyStack;
+
+            $keyStack = $context->keyStack;
+            $valueStack = $context->valueStack;
 
             self::walkRecursive($container, $results, $seg->depth - 1, $seg->preserveKey, $context);
 
@@ -391,9 +403,11 @@ final class Compiler
 
                 // If a downstream closure is provided, apply it to each result
                 if ($downStream) {
+                    $context->push(value: $v);
                     /** @psalm-var mixed */
                     $v = $downStream($v);
-                    $context->keyStack = $stack; // reset context stack level after each downstream call
+                    // reset context stack level after each downstream call
+                    $context->resetStack($keyStack, $valueStack);
                 }
 
                 if (null !== $v) {
@@ -434,7 +448,11 @@ final class Compiler
         ExtractContext $context,
         string|int|null $currentKey = null,
     ): void {
-        $context->push(null !== $currentKey ? (string) $currentKey : null);
+        if (null !== $currentKey) {
+            // If we have a current key, we push it to the context stack
+            $context->push((string) $currentKey);
+        }
+
         // TODO: dedupe code by use of AccessorProxy
         if (is_array($node) || $node instanceof \Traversable) {
             /** @var mixed $v */
@@ -471,7 +489,11 @@ final class Compiler
             }
         }
 
-        $context->pop();
+        // if we have a current key, then it was pushed on the stack
+        // so now we need to pop it
+        if (null !== $currentKey) {
+            $context->pop(key: true);
+        }
     }
 
     private static function compileRootSegment(Seg\ParsedRoot $seg, ExtractContext $context): \Closure
@@ -489,10 +511,10 @@ final class Compiler
                 $context->fail(": root `$key` not found in roots (valid roots are: ".substr($jsonRoots, 1, -1).')');
             }
 
-            $context->keyStack = []; // reset stack level to 0, as we are at the root
-            $context->push('$'.$key);
+            // reset stack levels to 0, as we are at the root
+            $context->resetStack([], []);
 
-            return $context->roots[$key];
+            return $context->push(key: '$'.$key, value: $context->roots[$key]);
         };
     }
 
@@ -526,7 +548,7 @@ final class Compiler
                         $context->fail('not found in array');
                     }
 
-                    return $container[$key];
+                    return $context->push(value: $container[$key]);
                 }
 
                 if ($container instanceof \ArrayAccess) {
@@ -534,7 +556,7 @@ final class Compiler
                         $context->fail('not found in ArrayAccess');
                     }
 
-                    return $container[$key];
+                    return $context->push(value: $container[$key]);
                 }
 
                 if (is_object($container)) {
@@ -543,7 +565,7 @@ final class Compiler
                         $context->fail('not accessible on '.get_class($container));
                     }
 
-                    return $getter($container);
+                    return $context->push(value: $getter($container));
                 }
 
                 $context->fail('could not be extracted from non-container of type `'.get_debug_type($container).'`');
@@ -558,7 +580,7 @@ final class Compiler
                         $context->fail('is null but required');
                     }
 
-                    return $container[$key];
+                    return $context->push(value: $container[$key]);
                 }
 
                 if (is_object($container)) {
@@ -572,26 +594,26 @@ final class Compiler
                         $context->fail('is null but required');
                     }
 
-                    return $value;
+                    return $context->push(value: $value);
                 }
             },
             // ThrowMode::NEVER
             default => function (mixed $container) use ($setup) {
                 /** @var mixed $container */
-                [$container, $key] = $setup($container);
+                [$container, $key, $context] = $setup($container);
 
                 if (is_array($container)) {
-                    return $container[$key] ?? null;
+                    return $context->push(value: $container[$key] ?? null);
                 }
 
                 if ($container instanceof \ArrayAccess) {
-                    return $container->offsetExists($key) ? $container[$key] : null;
+                    return $context->push(value: $container->offsetExists($key) ? $container[$key] : null);
                 }
 
                 if (is_object($container)) {
                     $getter = PropAccess::getGetterMap($container, [$key], true)[$key] ?? null;
 
-                    return $getter ? $getter($container) : null;
+                    return $context->push(value: $getter ? $getter($container) : null);
                 }
 
                 return null;
@@ -615,7 +637,8 @@ final class Compiler
 
             $fail = function (string $message) use ($throwMode, $context, $container): ?array {
                 if (ThrowMode::NEVER === $throwMode) {
-                    return null; // if mode is NEVER, we just return null
+                    /** @psalm-var null */
+                    return $context->push(value: null); // if mode is NEVER, we just return null
                 }
                 $type = get_debug_type($container);
                 $message = str_replace('{type}', $type, $message);
@@ -636,7 +659,7 @@ final class Compiler
             if (null === $start) {
                 if (null === $end) {
                     // no start or end specified, just return container as-is
-                    return $container;
+                    return $context->push(value: $container);
                 }
                 $start = 0;
             } elseif ($start < 0) {
@@ -698,7 +721,7 @@ final class Compiler
                 }
             }
 
-            return $slice;
+            return $context->push(value: $slice);
         };
     }
 
@@ -717,7 +740,7 @@ final class Compiler
         $context->pop();
 
         // bracket segment (multi)
-        return function (mixed $upstreamContainer) use ($seg, $context, $compiledBracketParts, $upstream) {
+        return function (mixed $upstreamContainer) use ($seg, $context, $compiledBracketParts, $upstream): mixed {
             /** @psalm-var mixed */
             $container = $upstream
                 ? $upstream($upstreamContainer)
@@ -725,14 +748,20 @@ final class Compiler
 
             $bracket = [];
             $keyStack = $context->keyStack;
+            $valueStack = $context->valueStack;
             $hasExplicitKey = false;
+
             foreach ($compiledBracketParts as $compiledChainExtractor) {
-                /** @var ?array{0: ?array-key, 1: mixed} $result */
+                // resolve bracket element
+                /** @var ?array{0: ?array-key, 1: mixed, 2: bool} $result */
                 $result = $compiledChainExtractor($container);
-                $context->keyStack = $keyStack; // reset context stack level after each segment
+
+                // reset context stack levels after each bracket element
+                $context->resetStack($keyStack, $valueStack);
+
                 if ($result) {
                     /** @var mixed $value */
-                    [$key, $value] = $result;
+                    [$key, $value, $hasExplicitKey] = $result;
 
                     // no need to catch exceptions here, they're already handled in the compiled chain
                     if (null === $key) {
@@ -741,16 +770,42 @@ final class Compiler
                     } else {
                         /** @psalm-var mixed */
                         $bracket[$key] = $value;
-                        $hasExplicitKey = true;
                     }
                 }
             }
 
             $context->push($seg->raw);
 
-            return 1 === count($bracket) && !$hasExplicitKey
-                ? reset($bracket) // if there's only one item in the bracket and preserveKey is false, return it directly
+            /** @psalm-var mixed */
+            $result = 1 === count($bracket) && !$hasExplicitKey
+                ? $bracket[0] // if there's only one item in the bracket and preserveKey is false, return it directly
                 : $bracket; // otherwise, return the whole bracket array
+
+            return $context->push(value: $result);
+        };
+    }
+
+    private static function compileStackRefSegment(Seg\ParsedStackRef $seg, ?\Closure $upstream, ExtractContext $context): \Closure
+    {
+        return function (mixed $container) use ($seg, $upstream, $context): mixed {
+            if ($upstream) {
+                /** @psalm-var mixed $container */
+                $upstream($container);
+            }
+
+            $context->push($seg->raw);
+
+            // If the stack reference is out of bounds, we throw an error
+            if (!array_key_exists($seg->index, $context->valueStack)) {
+                $mode = $seg->mode ?? $context->currentMode();
+                if (ThrowMode::NEVER === $mode) {
+                    return $context->push(value: null); // if mode is NEVER, we just return null
+                }
+                $context->fail("references index {$seg->index} but the value stack has only ".count($context->valueStack).' items');
+            }
+
+            // Return the value from the stack
+            return $context->push(value: $context->valueStack[$seg->index]);
         };
     }
 }

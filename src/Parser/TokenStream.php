@@ -153,6 +153,7 @@ final class TokenStream
                 // Single-character tokens
                 '*'     => new Token(TokenType::Star),
                 '@'     => new Token(TokenType::At),
+                '^'     => new Token(TokenType::Carret),
                 ':'     => new Token(TokenType::Colon),
                 '$'     => new Token(TokenType::Dollar),
                 ','     => new Token(TokenType::Comma),

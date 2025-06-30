@@ -8,9 +8,9 @@ enum TokenType: string
     case At = '@';
     case Bang = '!';
     case BlockComment = '/*block*/';
-    case RegExp = '/pattern/';
     case BracketClose = ']';
     case BracketOpen = '[';
+    case Carret = '^';
     case Colon = ':';
     case Comma = ',';
     case DblBang = '!!';
@@ -22,6 +22,7 @@ enum TokenType: string
     case Integer = 'INTEGER';
     case LineComment = '//';
     case Qstn = '?';
+    case RegExp = '/pattern/';
     case Star = '*';
     case String = 'STRING';
     case Tilde = '~';

@@ -162,6 +162,16 @@ final class Parser
             );
         }
 
+        if ($ts->consume([TokenType::Carret])) {
+            // Stack reference segment, e.g. `^1`, `^n`, `^` === `^0`
+            $index = (int) (($ts->consume([TokenType::Integer])[0] ?? null)?->value ?? 0);
+            if ($index < 0) {
+                $context->failParse($ts, 'negative indices are not allowed in ^n segments.');
+            }
+
+            return new Seg\ParsedStackRef($index, mode: $mode, raw: $getRaw());
+        }
+
         // Identifier segment
         if ($identToken = $ts->consume([[TokenType::Identifier, TokenType::String]])[0] ?? null) {
             // If we have an identifier, we can return it directly
