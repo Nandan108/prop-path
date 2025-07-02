@@ -238,7 +238,7 @@ final class PropPathIntegrationTest extends TestCase
         $roots = ['value' => null, 'dto' => $dto];
         $struct = ['[$, $value.1, $dto]', '$dto.bar', '$dto.foo'];
 
-        $this->assertEquals([[null, null, $dto], 'yes', null],
+        $this->assertEquals([null, 'yes', null],
             PropPath::extract($struct, $roots));
 
         $roots['value'] = ['a', 'b'];
@@ -384,17 +384,17 @@ final class PropPathIntegrationTest extends TestCase
             'Path segment $value.**.zabBaz.`zap` is null but required.'
         );
 
-        // $this->assertThrows(
-        //     fn () => $this->assertEquals('yes', $this->extract('quux.2.!w')),
-        //     EvaluationError::class,
-        //     'Path segment $value.quux.2.`w` not found in array.'
-        // );
+        $this->assertThrows(
+            fn () => $this->assertEquals('yes', $this->extract('quux.2.!w')),
+            EvaluationError::class,
+            'Path segment $value.quux.2.`w` not found in array.'
+        );
 
-        // $this->assertThrows(
-        //     fn () => $this->assertEquals('yes', $this->extract('boo.!x')),
-        //     EvaluationError::class,
-        //     'could not be extracted from non-container of type `string`.'
-        // );
+        $this->assertThrows(
+            fn () => $this->assertEquals('yes', $this->extract('boo.!x')),
+            EvaluationError::class,
+            'could not be extracted from non-container of type `string`.'
+        );
     }
 
     public function testItFailsWithCorrectErrorMessagesInComplexPaths(): void
@@ -717,13 +717,23 @@ final class PropPathIntegrationTest extends TestCase
 
     public function testStackRefSegment(): void
     {
+        // The fourth book has no ISBN, so it's an invalid key that's converted to an index: 0.
         /** @psalm-var mixed */
-        // books -> *[isbn => book] -> flatten(keep isbn keys) -> filter out keys not starting with '9'
-        $result = $this->extract('$dto.book[*isbn[^ => ^1]].@~.@/^9/');
+        $result = $this->extract('$dto.book[*[isbn => title]].@~');
         $this->assertEquals([
-            '916-x' => ['isbn' => '916-x', 'title' => 'B.One'],
-            '923-x' => ['isbn' => '923-x', 'title' => 'B.Two'],
-            '912-x' => ['isbn' => '912-x', 'title' => 'B.Three'],
+            '916-x' => 'B.One',
+            '923-x' => 'B.Two',
+            '912-x' => 'B.Three',
+            0       => 'B.Four',
+        ], $result);
+
+        /** @psalm-var mixed */
+        // When [^ => ^1.title] receives null (isbn key), it returns null, and that null is ignored by `*`
+        $result = $this->extract('$dto.book[*isbn[^ => ^1.title]].@~');
+        $this->assertEquals([
+            '916-x' => 'B.One',
+            '923-x' => 'B.Two',
+            '912-x' => 'B.Three',
         ], $result);
     }
 
@@ -985,7 +995,7 @@ final class PropPathIntegrationTest extends TestCase
         $this->assertThrows(
             fn (): mixed => $this->extract('foo.bar.baz![foo,1:3]'),
             EvaluationError::class,
-            'Path segment $value.foo.bar.baz.`foo` could not be extracted from non-container of type `null`.'
+            'Path segment $value.foo.bar.`baz` is null, therefore `![foo,1:3]` cannot be applied.'
         );
     }
 
@@ -1028,8 +1038,18 @@ final class PropPathIntegrationTest extends TestCase
 
     public function testCompilerThrowsOnInvalidStackRefIndex(): void
     {
-        $result = $this->extract('foo.bar.^3');
-        $this->assertNull($result);
+        /** @psalm-suppress MixedArrayAccess, MixedPropertyFetch*/
+        $this->assertSame($this->roots['value']['foo']->bar, $this->extract('foo.bar.^'));
+
+        /** @psalm-suppress MixedArrayAccess */
+        $this->assertSame($this->roots['value']['foo'], $this->extract('foo.bar.^1'));
+
+        /** @psalm-suppress MixedArrayAccess */
+        $this->assertSame($this->roots['value'], $this->extract('foo.bar.^2'));
+
+        /** @psalm-suppress MixedArrayAccess */
+        $this->assertSame(null, $this->extract('$.foo.bar.^3'));
+
         try {
             /** @psalm-var mixed */
             $this->extract('foo.bar.!^3');

@@ -21,7 +21,8 @@ segmentBody = identifier
             | regExp
             | flatten
             | onEach
-            | onEachRecursive ;
+            | onEachRecursive
+            | stackRef ;
 slice       = [ integer ], ":", [ integer ] ;
 regExp      = "/", { charExcept("/", "\\") | "\\" char }, "/", [ flags ] ;
 flags       = { "i" | "m" | "s" | "u" | "x" } ;
@@ -29,6 +30,7 @@ bracket     = "[", chain, { ",", chain }, "]" ;
 flatten     = "~" ;
 onEach      = "*", [ integer ] ;
 onEachRecursive = "**" ;
+stackRef    = "^", [integer] ;
 literal     = "'", { charExcept("'", "\\") | "\\" char }, "'"
             | "\"", { charExcept("\"", "\\") | "\\" char }, "\"";
 
@@ -61,9 +63,9 @@ Note: if a key is specified in the first path in the chain, it will be inherited
 
 Segment-level control for failure handling:
 
-* `?` → `ThrowMode::NEVER`: return `null` if access fails
-* `!` → `ThrowMode::MISSING_KEY`: throw if the key is missing
-* `!!` → `ThrowMode::NULL_VALUE`: throw if value is `null`
+* `?` ➔ `ThrowMode::NEVER`: return `null` if access fails
+* `!` ➔ `ThrowMode::MISSING_KEY`: throw if the key is missing
+* `!!` ➔ `ThrowMode::NULL_VALUE`: throw if value is `null`
 
 In a fallback chain (`foo ?? bar`), only the last path inherits the global throw mode. All preceding paths default to `NEVER`.
 
@@ -82,7 +84,7 @@ Examples:
 
 ```php
 // key derived from segment
-[foo.@name, foo.@group.name] → ['name' => 'Alice', 'group' => 'FooBar Group']
+[foo.@name, foo.@group.name] ➔ ['name' => 'Alice', 'group' => 'FooBar Group']
 
 // preserve keys while flattening
 foo.bar.@~
@@ -144,9 +146,14 @@ PropPath::extract('foo.-2:', $roots); // get last two elements
 
 ### Bracket Segments
 
-Brackets are used to
-- build nested arrays or associative structures, or
-- act as path delimiters — for example, to group the result of an on-each (*) segment before applying further operations.
+Brackets serve multiple roles:
+
+* **Build** nested arrays or associative structures
+* **Group** operations — for example, to delimit the result of an `onEach (*)` segment before applying further transformations
+* **Guard** path evaluation — if a bracket receives a `null` input, it immediately returns `null` or throws, depending on the segment's **Throw Mode** (`?`, `!`, `!!`)
+
+💡 Example:
+In the path `foo.bar.[$.what.ever.inside ?? $the.bracket]`, the bracket contents do not reference `foo.bar` or use its value — but they will only be evaluated if `foo.bar` is non-null.
 
 * Custom literal key: `['id' => foo.id]`
 * Custom dynamic key: `[foo.bar => foo.id]`
@@ -168,13 +175,13 @@ Brackets are used to
 
 These segments act as **wildcards** for iterating over containers:
 
-* `*` → shallow wildcard (depth 1, direct children)
-* `*2` → wildcard with limited depth (e.g. `*2`)
-* `**` → recursive wildcard (depth up to 256)
+* `*` ➔ shallow wildcard (depth 1, direct children)
+* `*2` ➔ wildcard with limited depth (e.g. `*2`)
+* `**` ➔ recursive wildcard (depth up to 256)
 
 Use brackets to stop downstream chaining:
-  - `[**phone]0 ?? "no phone"` → get value of first 'phone' key found at any depth, or fallback
-  - `store.books[*[isbn => title]].@~` → build a key-preserved map of titles by ISBN
+  - `[**phone]0 ?? "no phone"` ➔ get value of first 'phone' key found at any depth, or fallback
+  - `store.books[*[isbn => title]].@~` ➔ build a key-preserved map of titles by ISBN
 
 Preserve keys with `@*` or `@**`.
 
@@ -186,7 +193,7 @@ Flattens one level of nested containers.
 * `@~` preserves keys
 
 ```php
-// [['a', 'b'], ['c', 'd']] → ['a', 'b', 'c', 'd']
+// [['a', 'b'], ['c', 'd']] ➔ ['a', 'b', 'c', 'd']
 PropPath::extract('foo.bar.~', $roots);
 ```
 
@@ -205,6 +212,25 @@ Note that RexExp segments always preserve keys.
 // get array of book titles starting with 't' or 'T'
 PropPath::extract('books.[*.title]./^T/i', $roots);
 ```
+
+### StackRef Segments (`^n`)
+
+Access previously resolved values on the evaluation stack.
+
+- `^0` or `^` ➔ current value
+- `^1` ➔ immediate parent container
+- `^2` ➔ grandparent
+- … and so on
+
+Useful in recursive traversals, e.g. `books.**.isbn[^0 => ^1.title]`
+
+#### Prefix support:
+- `!`, `!!`, `?` (throw modes) are supported. The only throwing condition
+- `@` (key derivation) is meaningless and simply ignored on `^n` segments
+
+```php
+// Get each book's ISBN mapped to its title
+PropPath::extract('books[*isbn[^ => ^1.title]]@~', $roots);
 
 ---
 

@@ -99,7 +99,7 @@ final class Compiler
     /**
      * @param array<Seg\ParsedPath|Seg\ParsedLiteral> $paths
      */
-    public static function compileChain(array $paths, ExtractContext $context, bool $preserveKey = false, ?int $bracketElementNum = null): \Closure
+    public static function compileChain(array $paths, ExtractContext $context, bool $preserveKey = false, ?int $bracketElementIdx = null): \Closure
     {
         $compiledPaths = [];
 
@@ -139,7 +139,7 @@ final class Compiler
             }
         }
 
-        return function (mixed $container) use ($context, $compiledPaths, $bracketElementNum): mixed {
+        return function (mixed $container) use ($context, $compiledPaths, $bracketElementIdx): mixed {
             $keyStack = $context->keyStack;
             $valueStack = $context->valueStack;
 
@@ -154,7 +154,7 @@ final class Compiler
                 // if return result is non-null, we return it
                 if (null !== $result) {
                     // root chain just returns final result
-                    if (null === $bracketElementNum) {
+                    if (null === $bracketElementIdx) {
                         return $result;
                     }
 
@@ -179,7 +179,7 @@ final class Compiler
                 }
             }
 
-            return null === $bracketElementNum ? null : [null, null, false];
+            return null === $bracketElementIdx ? null : [null, null, false];
         };
     }
 
@@ -197,7 +197,11 @@ final class Compiler
                 $nextSegments = array_slice($segments, (int) $i + 1);
                 $downstream = $nextSegments ? self::compilePath($nextSegments, $context) : null;
 
-                return self::compileOnEachSegment($seg, upstream: $pipeline ?? null, context: $context, downStream: $downstream);
+                return self::wrapUpstream(
+                    upstream: $pipeline ?? null,
+                    context: $context,
+                    segmentFn: self::compileOnEachSegment($seg, $downstream)
+                );
             }
 
             $pipeline = self::compileSegment($seg, $context, upstream: $pipeline ?? null);
@@ -206,23 +210,48 @@ final class Compiler
         return $pipeline;
     }
 
-    private static function compileSegment(Seg\ParsedSegment $seg, ExtractContext $context, ?\Closure $upstream = null): \Closure
+    /**
+     * Summary of wrapUpstream.
+     *
+     * @param \Closure(ExtractContext, mixed):mixed $segmentFn
+     *
+     * @return \Closure(mixed): mixed
+     */
+    private static function wrapUpstream(?\Closure $upstream, ExtractContext $context, \Closure $segmentFn): \Closure
     {
-        return match (true) {
-            // if the segment is a ParsedKey, ParsedSlice, or ParsedBracket, compile it accordingly
-            $seg instanceof Seg\ParsedRoot     => self::compileRootSegment($seg, $context),
-            $seg instanceof Seg\ParsedKey      => self::compileKeySegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedFlatten  => self::compileFlattenSegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedSlice    => self::compileSliceSegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedBracket  => self::compileBracketSegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedRegExp   => self::compileRegExpSegment($seg, $upstream, $context),
-            $seg instanceof Seg\ParsedStackRef => self::compileStackRefSegment($seg, $upstream, $context),
-            // default will never happen, but let's keep static analysis happy
-            default                           => throw new \InvalidArgumentException('Invalid segment type: '.get_class($seg)),
+        return function () use ($upstream, $segmentFn, $context): mixed {
+            // run upstream closure, if provided
+            $upstream && $upstream();
+
+            // run the segment closure with the current context and value
+            // and push the resulting value onto the context stack
+            return $context->push(value: $segmentFn($context, $context->valueStack[0] ?? null));
         };
     }
 
-    private static function compileFlattenSegment(Seg\ParsedFlatten $seg, ?\Closure $upstream, ExtractContext $context): \Closure
+    private static function compileSegment(Seg\ParsedSegment $seg, ExtractContext $context, ?\Closure $upstream = null): \Closure
+    {
+        $segmentFn = match (true) {
+            // if the segment is a ParsedKey, ParsedSlice, or ParsedBracket, compile it accordingly
+            $seg instanceof Seg\ParsedRoot     => self::compileRootSegment($seg),
+            $seg instanceof Seg\ParsedKey      => self::compileKeySegment($seg, $context),
+            $seg instanceof Seg\ParsedFlatten  => self::compileFlattenSegment($seg),
+            $seg instanceof Seg\ParsedSlice    => self::compileSliceSegment($seg),
+            $seg instanceof Seg\ParsedBracket  => self::compileBracketSegment($seg, $context),
+            $seg instanceof Seg\ParsedRegExp   => self::compileRegExpSegment($seg),
+            $seg instanceof Seg\ParsedStackRef => self::compileStackRefSegment($seg),
+        };
+
+        // Wrap the segment function with upstream closure if provided
+        return self::wrapUpstream($upstream, $context, $segmentFn);
+    }
+
+    /**
+     * Compiles a flatten segment into a closure.
+     *
+     * @return \Closure(ExtractContext, mixed):mixed
+     */
+    private static function compileFlattenSegment(Seg\ParsedFlatten $seg): \Closure
     {
         $getItems = function (mixed $container, array $throwOn, Seg\ParsedFlatten $seg, ExtractContext $context): mixed {
             $values = null !== $container && !is_array($container)
@@ -238,16 +267,13 @@ final class Compiler
             return $values;
         };
 
-        return function (mixed $data) use ($seg, $upstream, $context, $getItems): mixed {
-            /** @psalm-var mixed */
-            $value = $upstream ? $upstream($data) : $data;
-
+        return function (ExtractContext $context, mixed $value) use ($seg, $getItems): mixed {
             $items = $getItems($value, [ThrowMode::MISSING_KEY, ThrowMode::NULL_VALUE], $seg, $context);
 
             if (!is_array($items)) {
                 // No need to throw an "Expected a container" error, it would already
                 // be thrown by $getItems if the mode is not ThrowMode::NEVER.
-                return $context->push(value: $items);
+                return $items;
             }
 
             /** @var array<string|int, mixed> */
@@ -277,18 +303,21 @@ final class Compiler
 
             $context->push($seg->raw);
 
-            return $context->push(value: $flattenedOutput);
+            return $flattenedOutput;
         };
     }
 
-    // Compile a RegExp key-filtering segment.
-    // This segment is intended to filter keys of an array or object using a regular expression.
-    private static function compileRegExpSegment(Seg\ParsedRegExp $seg, ?\Closure $upstream, ExtractContext $context): \Closure
+    /**
+     * Compiles a RegExp key-filtering segment.
+     * This segment is intended to filter keys of an array or object using a regular expression.
+     *
+     * @return \Closure(ExtractContext, mixed):mixed
+     */
+    private static function compileRegExpSegment(Seg\ParsedRegExp $seg): \Closure
     {
         // Not implemented yet, but we can return a placeholder for now.
-        return function (mixed $upstreamContainer) use ($seg, $upstream, $context): mixed {
+        return function (ExtractContext $context, mixed $originalContainer) use ($seg): mixed {
             /** @psalm-var mixed */
-            $originalContainer = $upstream ? $upstream($upstreamContainer) : $upstreamContainer;
             $mode = $seg->mode ?? $context->currentMode();
             $output = [];
             $container = null;
@@ -313,9 +342,9 @@ final class Compiler
             if ($errorMsg) {
                 $context->push($seg->raw);
 
-                return $context->push(value: ThrowMode::NEVER === $mode
+                return ThrowMode::NEVER === $mode
                     ? $container
-                    : $context->fail($errorMsg));
+                    : $context->fail($errorMsg);
             }
             /** @var non-empty-array $container */
 
@@ -356,20 +385,21 @@ final class Compiler
             // If we got a getter map from PropAccess, we resolve the values now.
             if ($containerIsGetterMap) {
                 /** @var array<string, Closure(mixed):mixed> $output */
-                return $context->push(value: PropAccess::resolveValues($output, $originalContainer));
+                return PropAccess::resolveValues($output, $originalContainer);
             }
 
-            return $context->push(value: $output); // return the filtered output
+            return $output; // return the filtered output
         };
     }
 
-    private static function compileOnEachSegment(Seg\ParsedOnEach $seg, ?\Closure $upstream, ExtractContext $context, ?\Closure $downStream): \Closure
+    /**
+     * Compiles an onEach segment into a closure.
+     *
+     * @return \Closure(ExtractContext, mixed):mixed
+     */
+    private static function compileOnEachSegment(Seg\ParsedOnEach $seg, ?\Closure $downStream): \Closure
     {
-        return function (mixed $upsteamContainer) use ($seg, $upstream, $context, $downStream): ?array {
-            /** @psalm-var mixed */
-            $container = $upstream ? $upstream($upsteamContainer) : $upsteamContainer;
-            $results = [];
-
+        return function (ExtractContext $context, mixed $container) use ($seg, $downStream): ?array {
             $context->push(mode: $seg->mode);
 
             if (null === $container || is_scalar($container)) {
@@ -388,6 +418,8 @@ final class Compiler
             $keyStack = $context->keyStack;
             $valueStack = $context->valueStack;
 
+            /** @var array<array-key, mixed> */
+            $results = [];
             self::walkRecursive($container, $results, $seg->depth - 1, $seg->preserveKey, $context);
 
             if (ThrowMode::NEVER !== $context->currentMode() && empty($results)) {
@@ -496,9 +528,14 @@ final class Compiler
         }
     }
 
-    private static function compileRootSegment(Seg\ParsedRoot $seg, ExtractContext $context): \Closure
+    /**
+     * Compiles a root segment into a closure that extracts the root value from the context.
+     *
+     * @return \Closure(ExtractContext, mixed):mixed
+     */
+    private static function compileRootSegment(Seg\ParsedRoot $seg): \Closure
     {
-        return function () use ($seg, $context): mixed {
+        return function (ExtractContext $context) use ($seg): mixed {
             // resolve root key (custom key ?? (default key = first root key))
             // empty roots are not allowed, so we can safely assume that there is at least one root
             /** @var string|int $key */
@@ -513,78 +550,69 @@ final class Compiler
 
             // reset stack levels to 0, as we are at the root
             $context->resetStack([], []);
+            $context->push(key: '$'.$key);
 
-            return $context->push(key: '$'.$key, value: $context->roots[$key]);
+            return $context->roots[$key];
         };
     }
 
-    private static function compileKeySegment(Seg\ParsedKey $seg, ?\Closure $upstream, ExtractContext $context): \Closure
+    /**
+     * Compiles a key segment into a closure that extracts a value from a container.
+     *
+     * @return \Closure(ExtractContext, mixed):mixed
+     */
+    private static function compileKeySegment(Seg\ParsedKey $seg, ExtractContext $context): \Closure
     {
-        /** @var \Closure(mixed): array{mixed, string|int, ExtractContext} $setup */
-        $setup = function (mixed $container) use ($seg, $upstream, $context): array {
-            if ($upstream) {
-                /** @psalm-var mixed $container */
-                $container = $upstream($container);
-            }
-            $context->push((string) $seg->key, $seg->mode);
-
-            return [$container, $seg->key, $context];
-        };
-
-        $mode = $seg->mode ?? $context->currentMode();
-
         // If we specifying a return type here, intelephense complains: "Not all paths return a value",
         // despite the presence of a final throw (via $this->fail()). So instead, we don't declare a
         // return type and suppress psalm's complaint.
         /** @psalm-suppress MissingClosureReturnType */
-        return match ($mode) {
-            ThrowMode::MISSING_KEY => function (mixed $parentContainer) use ($setup) {
-                /** @var mixed $container */
-                [$container, $key, $context] = $setup($parentContainer);
+        return match ($seg->mode ?? $context->currentMode()) {
+            ThrowMode::MISSING_KEY => function (ExtractContext $context, mixed $container) use ($seg) {
+                $context->push((string) $seg->key, $seg->mode);
 
                 if (is_array($container)) {
-                    if (!array_key_exists($key, $container)) {
+                    if (!array_key_exists($seg->key, $container)) {
                         // /** @psalm-suppress PossiblyFalseOperand */
                         $context->fail('not found in array');
                     }
 
-                    return $context->push(value: $container[$key]);
+                    return $container[$seg->key];
                 }
 
                 if ($container instanceof \ArrayAccess) {
-                    if (!$container->offsetExists($key)) {
+                    if (!$container->offsetExists($seg->key)) {
                         $context->fail('not found in ArrayAccess');
                     }
 
-                    return $context->push(value: $container[$key]);
+                    return $container[$seg->key];
                 }
 
                 if (is_object($container)) {
-                    $getter = PropAccess::getGetterMap($container, (string) $key)[$key] ?? null;
+                    $getter = PropAccess::getGetterMap($container, (string) $seg->key)[$seg->key] ?? null;
                     if (!$getter) {
                         $context->fail('not accessible on '.get_class($container));
                     }
 
-                    return $context->push(value: $getter($container));
+                    return $getter($container);
                 }
 
                 $context->fail('could not be extracted from non-container of type `'.get_debug_type($container).'`');
             },
 
-            ThrowMode::NULL_VALUE => function (mixed $container) use ($setup) {
-                /** @var mixed $container */
-                [$container, $key, $context] = $setup($container);
+            ThrowMode::NULL_VALUE => function (ExtractContext $context, mixed $container) use ($seg) {
+                $context->push((string) $seg->key, $seg->mode);
 
                 if (is_array($container) || $container instanceof \ArrayAccess) {
-                    if (!isset($container[$key])) {
+                    if (!isset($container[$seg->key])) {
                         $context->fail('is null but required');
                     }
 
-                    return $context->push(value: $container[$key]);
+                    return $container[$seg->key];
                 }
 
                 if (is_object($container)) {
-                    $getter = PropAccess::getGetterMap($container, [$key], true)[$key] ?? null;
+                    $getter = PropAccess::getGetterMap($container, [$seg->key], true)[$seg->key] ?? null;
                     if (!$getter) {
                         $context->fail('not accessible on '.get_class($container));
                     }
@@ -594,26 +622,25 @@ final class Compiler
                         $context->fail('is null but required');
                     }
 
-                    return $context->push(value: $value);
+                    return $value;
                 }
             },
             // ThrowMode::NEVER
-            default => function (mixed $container) use ($setup) {
-                /** @var mixed $container */
-                [$container, $key, $context] = $setup($container);
+            default => function (ExtractContext $context, mixed $container) use ($seg) {
+                $context->push((string) $seg->key, $seg->mode);
 
                 if (is_array($container)) {
-                    return $context->push(value: $container[$key] ?? null);
+                    return $container[$seg->key] ?? null;
                 }
 
                 if ($container instanceof \ArrayAccess) {
-                    return $context->push(value: $container->offsetExists($key) ? $container[$key] : null);
+                    return $container->offsetExists($seg->key) ? $container[$seg->key] : null;
                 }
 
                 if (is_object($container)) {
-                    $getter = PropAccess::getGetterMap($container, [$key], true)[$key] ?? null;
+                    $getter = PropAccess::getGetterMap($container, [$seg->key], true)[$seg->key] ?? null;
 
-                    return $context->push(value: $getter ? $getter($container) : null);
+                    return $getter ? $getter($container) : null;
                 }
 
                 return null;
@@ -621,16 +648,17 @@ final class Compiler
         };
     }
 
-    private static function compileSliceSegment(Seg\ParsedSlice $seg, ?\Closure $upstream, ExtractContext $context): \Closure
+    /**
+     * Compiles a slice segment into a closure that extracts a slice from an array or ArrayAccess.
+     *
+     * @return \Closure(ExtractContext, mixed):mixed
+     */
+    private static function compileSliceSegment(Seg\ParsedSlice $seg): \Closure
     {
-        return function (mixed $container) use ($seg, $upstream, $context): array|\ArrayAccess|null {
+        return function (ExtractContext $context, mixed $container) use ($seg): array|\ArrayAccess|null {
             $start = $seg->start;
             $end = $seg->end;
 
-            if ($upstream) {
-                /** @psalm-var mixed $container */
-                $container = $upstream($container);
-            }
             $context->push($seg->raw);
 
             $throwMode = $seg->mode ?? $context->currentMode();
@@ -638,7 +666,7 @@ final class Compiler
             $fail = function (string $message) use ($throwMode, $context, $container): ?array {
                 if (ThrowMode::NEVER === $throwMode) {
                     /** @psalm-var null */
-                    return $context->push(value: null); // if mode is NEVER, we just return null
+                    return null; // if mode is NEVER, we just return null
                 }
                 $type = get_debug_type($container);
                 $message = str_replace('{type}', $type, $message);
@@ -659,7 +687,7 @@ final class Compiler
             if (null === $start) {
                 if (null === $end) {
                     // no start or end specified, just return container as-is
-                    return $context->push(value: $container);
+                    return $container;
                 }
                 $start = 0;
             } elseif ($start < 0) {
@@ -721,55 +749,63 @@ final class Compiler
                 }
             }
 
-            return $context->push(value: $slice);
+            return $slice;
         };
     }
 
-    private static function compileBracketSegment(Seg\ParsedBracket $seg, ?\Closure $upstream, ExtractContext $context): \Closure
+    /**
+     * Compiles a bracket segment into a closure.
+     *
+     * @return \Closure(ExtractContext, mixed):mixed
+     */
+    private static function compileBracketSegment(Seg\ParsedBracket $seg, ExtractContext $context): \Closure
     {
         $throwMode = $seg->mode ?? $context->currentMode();
 
         $context->push(mode: $throwMode);
 
         $compiledBracketParts = [];
-        foreach ($seg->chains as $bracketElementNum => $chain) {
-            $extractor = self::compileChain($chain, $context, $seg->preserveKey, $bracketElementNum);
+        foreach ($seg->chains as $bracketElementIdx => $chain) {
+            $extractor = self::compileChain($chain, $context, $seg->preserveKey, $bracketElementIdx);
             $compiledBracketParts[] = $extractor;
         }
 
         $context->pop();
 
         // bracket segment (multi)
-        return function (mixed $upstreamContainer) use ($seg, $context, $compiledBracketParts, $upstream): mixed {
-            /** @psalm-var mixed */
-            $container = $upstream
-                ? $upstream($upstreamContainer)
-                : $upstreamContainer; // upstream is optional, if not provided, we use the upstreamContainer directly
-
+        return function (ExtractContext $context, mixed $value) use ($seg, $compiledBracketParts): mixed {
             $bracket = [];
             $keyStack = $context->keyStack;
             $valueStack = $context->valueStack;
             $hasExplicitKey = false;
 
+            // If the value is null, abort and return or throw according to the throwMode
+            if (null === $value) {
+                if (ThrowMode::NEVER === ($seg->mode ?? $context->currentMode())) {
+                    return null; // if mode is NEVER, we just return null
+                }
+                $context->fail("is null, therefore `$seg->raw` cannot be applied");
+            }
+
             foreach ($compiledBracketParts as $compiledChainExtractor) {
                 // resolve bracket element
                 /** @var ?array{0: ?array-key, 1: mixed, 2: bool} $result */
-                $result = $compiledChainExtractor($container);
+                $result = $compiledChainExtractor($value);
 
                 // reset context stack levels after each bracket element
                 $context->resetStack($keyStack, $valueStack);
 
                 if ($result) {
-                    /** @var mixed $value */
-                    [$key, $value, $hasExplicitKey] = $result;
+                    /** @var mixed $chainValue */
+                    [$chainKey, $chainValue, $hasExplicitKey] = $result;
 
                     // no need to catch exceptions here, they're already handled in the compiled chain
-                    if (null === $key) {
+                    if (null === $chainKey) {
                         /** @psalm-var mixed */
-                        $bracket[] = $value;
+                        $bracket[] = $chainValue;
                     } else {
                         /** @psalm-var mixed */
-                        $bracket[$key] = $value;
+                        $bracket[$chainKey] = $chainValue;
                     }
                 }
             }
@@ -781,21 +817,21 @@ final class Compiler
                 ? $bracket[0] // if there's only one item in the bracket and preserveKey is false, return it directly
                 : $bracket; // otherwise, return the whole bracket array
 
-            return $context->push(value: $result);
+            return $result;
         };
     }
 
-    private static function compileStackRefSegment(Seg\ParsedStackRef $seg, ?\Closure $upstream, ExtractContext $context): \Closure
+    /**
+     * Compiles a slice segment into a closure that extracts a slice from an array or ArrayAccess.
+     *
+     * @return \Closure(ExtractContext, mixed):mixed
+     */
+    private static function compileStackRefSegment(Seg\ParsedStackRef $seg): \Closure
     {
-        return function (mixed $container) use ($seg, $upstream, $context): mixed {
-            if ($upstream) {
-                /** @psalm-var mixed $container */
-                $upstream($container);
-            }
-
+        return function (ExtractContext $context) use ($seg): mixed {
             $context->push($seg->raw);
 
-            // If the stack reference is out of bounds, we throw an error
+            // If the stack reference is out of bounds, we return null or throw an error according to ThrowMode
             if (!array_key_exists($seg->index, $context->valueStack)) {
                 $mode = $seg->mode ?? $context->currentMode();
                 if (ThrowMode::NEVER === $mode) {
