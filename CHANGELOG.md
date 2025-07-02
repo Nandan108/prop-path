@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.1] – 2025-07-01
+[0.2.1]: https://github.com/nandan108/prop-path/compare/v0.2.0...v0.2.1
+
+### Changed
+- Replaced abstract `PropPathException` class with a `PropPathException` interface (`Contract\PropPathException`)
+- `SyntaxError` now extends `\InvalidArgumentException`, and `EvaluationError` extends `\RuntimeException`
+- Both error classes implement `PropPathException` for unified exception handling
+- Refactored `ExtractContext::failWith()` to delegate formatting logic to `getEvalErrorMessage()`, making it easier to override or customize
+
+
 ## [0.2.0] – 2025-06-29
 [0.2.0]: https://github.com/nandan108/prop-path/compare/v0.1.0...v0.2.0
 

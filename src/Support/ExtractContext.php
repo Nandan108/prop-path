@@ -70,17 +70,22 @@ final class ExtractContext
         };
 
         $this->failWith = function (string $msg, array $keyStack): never {
-            $keyStack = array_map(
-                /** @param array{?string, ?ThrowMode} $item */
-                fn (array $item): ?string => $item[0],
-                $keyStack
-            );
-            $keyStack = array_filter($keyStack, fn ($item): bool => null !== $item && '' !== $item);
-            $lastKey = array_pop($keyStack);
-            $keyStackStr = implode('.', $keyStack).($keyStack ? '.' : '')."`$lastKey`";
-
-            throw new EvaluationError("Path segment $keyStackStr $msg.");
+            throw new EvaluationError($this->getEvalErrorMessage($msg, $keyStack));
         };
+    }
+
+    private function getEvalErrorMessage(string $message, array $keyStack): string
+    {
+        $keyStack = array_map(
+            /** @param array{?string, ?ThrowMode} $item */
+            fn (array $item): ?string => $item[0],
+            $keyStack
+        );
+        $keyStack = array_filter($keyStack, fn ($item): bool => null !== $item && '' !== $item);
+        $lastKey = array_pop($keyStack);
+        $keyStackStr = implode('.', $keyStack).($keyStack ? '.' : '')."`$lastKey`";
+
+        return "Path segment $keyStackStr $message.";
     }
 
     /**

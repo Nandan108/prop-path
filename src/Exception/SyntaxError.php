@@ -2,6 +2,8 @@
 
 namespace Nandan108\PropPath\Exception;
 
-final class SyntaxError extends PropPathException
+use Nandan108\PropPath\Contract\PropPathException;
+
+final class SyntaxError extends \InvalidArgumentException implements PropPathException
 {
 }

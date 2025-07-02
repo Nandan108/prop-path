@@ -2,6 +2,8 @@
 
 namespace Nandan108\PropPath\Exception;
 
-final class EvaluationError extends PropPathException
+use Nandan108\PropPath\Contract\PropPathException;
+
+final class EvaluationError extends \RuntimeException implements PropPathException
 {
 }
