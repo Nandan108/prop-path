@@ -16,7 +16,7 @@ final class Compiler
      *
      * @param \Closure(string, ?string): never $failParseWith
      *
-     * @return array{context: ExtractContext, extractor: \Closure}
+     * @return array{context: ExtractContext, extractor: \Closure(): mixed}
      */
     public static function compile(
         array|string $paths,
@@ -45,7 +45,7 @@ final class Compiler
     /**
      * Compiles an input structure (array of paths) into a closure that extracts values from a container.
      *
-     * @return \Closure(mixed):mixed
+     * @return \Closure():mixed
      */
     private static function compileInputStructure(array $structure, ExtractContext $context): \Closure
     {
@@ -62,13 +62,13 @@ final class Compiler
             };
         }
 
-        return function (mixed $container) use (&$compiled): array {
+        return function () use (&$compiled): array {
             $output = [];
             /** @psalm-suppress UnnecessaryVarAnnotation */
             /** @var \Closure $fn */
             foreach ($compiled as $key => $fn) {
                 /** @psalm-var mixed */
-                $output[$key] = $fn($container);
+                $output[$key] = $fn();
             }
 
             return $output;
@@ -88,6 +88,7 @@ final class Compiler
         return Parser::parseChain($ts, $context, inBraket: false); // Parse the path into an AST (Abstract Syntax Tree)
     }
 
+    /** @return \Closure(): mixed */
     private static function compileInputString(string $path, ExtractContext $context): \Closure
     {
         $AST = self::getAst($path, $context);
@@ -98,6 +99,8 @@ final class Compiler
 
     /**
      * @param array<Seg\ParsedPath|Seg\ParsedLiteral> $paths
+     *
+     * @return \Closure(): mixed
      */
     public static function compileChain(array $paths, ExtractContext $context, bool $preserveKey = false, ?int $bracketElementIdx = null): \Closure
     {
@@ -139,7 +142,7 @@ final class Compiler
             }
         }
 
-        return function (mixed $container) use ($context, $compiledPaths, $bracketElementIdx): mixed {
+        return function () use ($context, $compiledPaths, $bracketElementIdx): mixed {
             $keyStack = $context->keyStack;
             $valueStack = $context->valueStack;
 
@@ -149,7 +152,7 @@ final class Compiler
                 // make sure we reset the context's stacks before each evaluating each path
                 $context->resetStack($keyStack, $valueStack);
 
-                $result = $compiledPath($container);
+                $result = $compiledPath();
 
                 // if return result is non-null, we return it
                 if (null !== $result) {
@@ -163,7 +166,7 @@ final class Compiler
                         $context->resetStack($keyStack, $valueStack);
 
                         /** @psalm-var mixed */
-                        $key = $key($container);
+                        $key = $key();
 
                         // It's not the chain's job to throw, so ignore invalid keys
                         if (!(is_scalar($key) || $key instanceof \Stringable)) {
@@ -185,6 +188,8 @@ final class Compiler
 
     /**
      * @param Seg\ParsedSegment[] $segments
+     *
+     * @return \Closure(): mixed
      */
     private static function compilePath(array $segments, ExtractContext $context): \Closure
     {
@@ -211,11 +216,9 @@ final class Compiler
     }
 
     /**
-     * Summary of wrapUpstream.
-     *
      * @param \Closure(ExtractContext, mixed):mixed $segmentFn
      *
-     * @return \Closure(mixed): mixed
+     * @return \Closure(): mixed
      */
     private static function wrapUpstream(?\Closure $upstream, ExtractContext $context, \Closure $segmentFn): \Closure
     {
@@ -229,6 +232,11 @@ final class Compiler
         };
     }
 
+    /**
+     * @param \Closure(): mixed $upstream
+     *
+     * @return \Closure(): mixed
+     */
     private static function compileSegment(Seg\ParsedSegment $seg, ExtractContext $context, ?\Closure $upstream = null): \Closure
     {
         $segmentFn = match (true) {
@@ -790,7 +798,7 @@ final class Compiler
             foreach ($compiledBracketParts as $compiledChainExtractor) {
                 // resolve bracket element
                 /** @var ?array{0: ?array-key, 1: mixed, 2: bool} $result */
-                $result = $compiledChainExtractor($value);
+                $result = $compiledChainExtractor();
 
                 // reset context stack levels after each bracket element
                 $context->resetStack($keyStack, $valueStack);

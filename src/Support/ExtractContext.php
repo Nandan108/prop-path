@@ -74,7 +74,7 @@ final class ExtractContext
         };
     }
 
-    private function getEvalErrorMessage(string $message, array $keyStack): string
+    public function getEvalErrorMessage(string $message, array $keyStack): string
     {
         $keyStack = array_map(
             /** @param array{?string, ?ThrowMode} $item */

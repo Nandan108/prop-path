@@ -41,7 +41,7 @@ composer require nandan108/prop-path
 ```
 
 - Requires **PHP 8.1+**
-- No runtime dependencies (except [nandan108/prop-access](https://github.com/nandan108/prop-access))
+- Only *one* runtime dependency: [nandan108/prop-access](https://github.com/nandan108/prop-access)
 
 ---
 
@@ -169,12 +169,15 @@ PropPath::boot(): void
 
 ---
 
-## ✅ Requirements and Quality
+## ✅ Quality
 
-- PHP 8.1+
 - 100% test coverage
-- Psalm level: 1
-- 0 runtime deps (only `prop-access`)
+- Psalm: level 1 (the strictest)
+- Code style enforced with [PHP-CS-Fixer](https://github.com/PHP-CS-Fixer/PHP-CS-Fixer):
+  - Based on the `@Symfony` rule set
+  - Aligned `=>` for better readability
+  - Disallows implicit loose comparisons (`==`, `!=`)
+
 
 ---
 

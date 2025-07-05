@@ -15,7 +15,7 @@ use Nandan108\PropPath\Support\ThrowMode;
  */
 final class PropPath
 {
-    /** @var array<string, \Closure> */
+    /** @var array<string, \Closure(array, ?\Closure(string, list<array{string, ThrowMode}>): never): mixed> */
     public static array $cache = [];
 
     public static function boot(): void
@@ -40,6 +40,8 @@ final class PropPath
      * @param string|array                     $paths         a path or array of paths (possibly nested) to compile
      * @param \Closure(string, ?string): never $failParseWith a callable to invoke when path parsing fails (throws a SyntaxError by default)
      *
+     * @return \Closure(array, ?\Closure(string, list<array{string, ThrowMode}>): never=): mixed
+     *
      * @throws \JsonException in case of invalid JSON encoding of paths
      * @throws SyntaxError    if a syntax  is invalid
      */
@@ -62,20 +64,24 @@ final class PropPath
         }
 
         // Compile just the path structure
-        ['context' => $context, 'extractor' => $extractor] = Compiler::compile(
+        ['context' => $context, 'extractor' => $innerExtractor] = Compiler::compile(
             $paths,
             $failParseWith,
             $defaultThrowMode
         );
 
-        // Here we add a compile step, which resets the roots on the extraction context, and possibly sets a custom failure handler.
+        // Here we add a compile step, which resets the roots on the extraction context,
+        // and possibly sets a custom failure handler.
         $extractor =
-            /** @param \Closure(string, list<array{string, ThrowMode}>): never $failEvalWith */
-            function (array $roots, ?\Closure $failEvalWith = null) use ($extractor, $context): mixed {
+            /**
+             * @param array<array-key, mixed>                                 $roots
+             * @param \Closure(string, list<array{string, ThrowMode}>): never $failEvalWith
+             **/
+            function (array $roots, ?\Closure $failEvalWith = null) use ($innerExtractor, $context): mixed {
                 // Prepare context by setting roots to be used for extraction
                 $context->prepareForEval($roots, failWith: $failEvalWith);
 
-                return $extractor($roots);
+                return $innerExtractor();
             };
 
         if (!$ignoreCache) {

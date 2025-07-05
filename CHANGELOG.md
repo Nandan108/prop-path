@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.2] – 2025-07-05
+
+### Changed
+- Bumped dependency to `nandan108/prop-access` v0.5.0 to align with updated exception hierarchy.
+- Tightened types on public APIs for better developer experience and improved static analysis (e.g. when consumed by `dto-toolkit`).
+
 ## [0.2.1] – 2025-07-01
 [0.2.1]: https://github.com/nandan108/prop-path/compare/v0.2.0...v0.2.1
 
