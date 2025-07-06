@@ -4,14 +4,29 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
-## [0.2.2] – 2025-07-05
+## [v0.3.0] – 2025-07-06
+[v0.3.0]: https://github.com/nandan108/prop-path/compare/v0.2.2...v0.3.0
+
+### Changed
+- Refactored internal error handling for clarity and compatibility with PHP 8.1.
+- The evaluation failure handler (`failWith`) now receives an `ExtractContext` object as its second argument, instead of relying on `$this` inside the closure.
+  - This avoids closure rebinding and improves static analysis compatibility.
+  - If you passed a custom failure handler to `PropPath::compile()` or `ExtractContext::prepareForEval()`, update its signature to:
+    ```php
+    fn (string $message, ExtractContext $context): never
+    ```
+- Removed `@internal` annotation from `ExtractContext` class
+
+
+## [v0.2.2] – 2025-07-05
+[v0.2.2]: https://github.com/nandan108/prop-path/compare/v0.2.1...v0.2.2
 
 ### Changed
 - Bumped dependency to `nandan108/prop-access` v0.5.0 to align with updated exception hierarchy.
 - Tightened types on public APIs for better developer experience and improved static analysis (e.g. when consumed by `dto-toolkit`).
 
-## [0.2.1] – 2025-07-01
-[0.2.1]: https://github.com/nandan108/prop-path/compare/v0.2.0...v0.2.1
+## [v0.2.1] – 2025-07-01
+[v0.2.1]: https://github.com/nandan108/prop-path/compare/v0.2.0...v0.2.1
 
 ### Changed
 - Replaced abstract `PropPathException` class with a `PropPathException` interface (`Contract\PropPathException`)
@@ -20,8 +35,8 @@ This project adheres to [Semantic Versioning](https://semver.org).
 - Refactored `ExtractContext::failWith()` to delegate formatting logic to `getEvalErrorMessage()`, making it easier to override or customize
 
 
-## [0.2.0] – 2025-06-29
-[0.2.0]: https://github.com/nandan108/prop-path/compare/v0.1.0...v0.2.0
+## [v0.2.0] – 2025-06-29
+[v0.2.0]: https://github.com/nandan108/prop-path/compare/v0.1.0...v0.2.0
 
 ### Added
 
@@ -39,7 +54,7 @@ This project adheres to [Semantic Versioning](https://semver.org).
 * Brackets receiving a null value (e.g. isbn is null in above example) now return
   `null` instead of evaluating the bracket expression and returning the result.
 
-## [0.1.0] - 2025-06-29
+## v0.1.0 - 2025-06-29
 
 Initial public release.
 

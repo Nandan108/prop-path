@@ -8,15 +8,13 @@ use Nandan108\PropPath\Parser\TokenStream;
 
 /**
  * ExtractContext is used to hold the context of the extraction process.
- *
- * @internal
  */
 final class ExtractContext
 {
     /**
      * The callable to invoke when evaluating a path segment fails.
      *
-     * @var \Closure(string, list<array{string, ThrowMode}>): never
+     * @var \Closure(string, ExtractContext): never
      */
     public \Closure $failWith;
 
@@ -69,17 +67,17 @@ final class ExtractContext
             throw new SyntaxError($msg);
         };
 
-        $this->failWith = function (string $msg, array $keyStack): never {
-            throw new EvaluationError($this->getEvalErrorMessage($msg, $keyStack));
+        $this->failWith = function (string $msg, ExtractContext $context): never {
+            throw new EvaluationError($context->getEvalErrorMessage($msg));
         };
     }
 
-    public function getEvalErrorMessage(string $message, array $keyStack): string
+    public function getEvalErrorMessage(string $message): string
     {
         $keyStack = array_map(
             /** @param array{?string, ?ThrowMode} $item */
             fn (array $item): ?string => $item[0],
-            $keyStack
+            $this->keyStack,
         );
         $keyStack = array_filter($keyStack, fn ($item): bool => null !== $item && '' !== $item);
         $lastKey = array_pop($keyStack);
@@ -91,23 +89,22 @@ final class ExtractContext
     /**
      * Prepare the context for evaluation by setting the roots and possibly the failWith closure.
      *
-     * @param ?\Closure(string, list<array{string, ThrowMode}>): never $failWith
+     * @param ?\Closure(string, ExtractContext): never $failWith
      *
      * @throws EvaluationError
      * @throws \InvalidArgumentException
      */
     public function prepareForEval(array $roots, ?\Closure $failWith = null): void
     {
+        // Reset the key and value stacks.
         $this->keyStack = [];
-        // Ensure the failWith closure is bound to the current instance so it has acccess to the whole context if necessary.
+
+        // Override the failWith closure if provided.
         if ($failWith) {
-            /** @var \Closure(string, list<array{string, ThrowMode}>): never */
-            $failWith = $failWith->bindTo($this, self::class) ?? $failWith;
+            $this->failWith = $failWith;
         }
 
-        $this->failWith = $failWith ?? $this->failWith;
-
-        $this->roots = $roots;
+        // Check root validity, then set the roots for the evaluation.
         if (!$roots) {
             throw new \InvalidArgumentException('Roots must be a non-empty array.');
         }
@@ -116,6 +113,7 @@ final class ExtractContext
                 throw new \InvalidArgumentException('Roots keys must be identifiers (strings matching \'/^[a-z_][\w-]*$/i\').');
             }
         }
+        $this->roots = $roots;
     }
 
     /**
@@ -196,7 +194,7 @@ final class ExtractContext
      */
     public function fail(string $message): never
     {
-        ($this->failWith)($message, $this->keyStack);
+        ($this->failWith)($message, $this);
     }
 
     public function failParse(TokenStream $ts, string $message, int $additional = 0): never

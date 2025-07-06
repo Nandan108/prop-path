@@ -131,7 +131,7 @@ final class PropPathIntegrationTest extends TestCase
     /**
      * Extracts a value from $this->roots using the given path.
      *
-     * @param ?\Closure(string, list<array{string, ThrowMode}>): never $failWith
+     * @param ?\Closure(string, ExtractContext): never $failWith
      */
     private function extract(array|string $path, ?callable $failWith = null, ThrowMode $throwMode = ThrowMode::NEVER): mixed
     {
@@ -1119,7 +1119,7 @@ final class PropPathIntegrationTest extends TestCase
         $failParseWith = function (string $msg, ?string $parsed = null): never {
             // Assert access to $this->paths
             /** @var ExtractContext $this */
-            /** @psalm-suppress UndefinedThisPropertyFetch, InternalProperty */
+            /** @psalm-suppress UndefinedThisPropertyFetch */
             if (!is_string($this->paths)) {
                 throw new \LogicException('Expected string path for this test');
             }
@@ -1144,7 +1144,6 @@ final class PropPathIntegrationTest extends TestCase
             $this->fail('fail() did not throw');
         } catch (SyntaxError $e) {
             $this->assertStringContainsString('Custom parse error on `foo[!` near `foo[!`: test', $e->getMessage());
-            /** @psalm-suppress InternalProperty */
             $this->assertTrue($context->roots['checked']);
         }
     }
@@ -1154,9 +1153,8 @@ final class PropPathIntegrationTest extends TestCase
         /** @psalm-suppress InternalClass, InternalMethod */
         $context = new ExtractContext(paths: 'foo.!bar');
 
-        $failWith = function (string $message): never {
-            // ✅ Access $this->roots inside closure
-            $this->roots['checked'] = true;
+        $failWith = function (string $message, ExtractContext $context): never {
+            $context->roots['checked'] = true;
             throw new EvaluationError('Custom fail: '.$message);
         };
 
