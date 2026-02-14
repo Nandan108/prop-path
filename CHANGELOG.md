@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [v0.4.0] – 2026-02-14
+[v0.4.0]: https://github.com/nandan108/prop-path/compare/v0.3.0...v0.4.0
+
+### Added
+- Added `EvaluationErrorCode` enum for machine-actionable evaluation failure classification.
+- `EvaluationError` now exposes machine-readable metadata:
+  - `public readonly EvaluationErrorCode $errorCode`
+  - `getErrorCode(): EvaluationErrorCode`
+  - `getMessageParameters(): array`
+  - `getPropertyPath(): ?string`
+  - `getDebugInfoMap(): array`
+- Added `EvaluationFailureDetails` value object to capture evaluation failure context snapshot (code, parameters, debug, modes, paths, roots, stacks, property path).
+- Added `proppath.eval.invalid_key_type` (`EvaluationErrorCode::INVALID_KEY_TYPE`) for flatten operations with non-`array-key` keys when preserving keys.
+
+### Changed
+- Breaking: custom evaluation failure handlers now receive `EvaluationFailureDetails` as second argument, instead of `ExtractContext`.
+  - New signature:
+    ```php
+    fn (string $message, EvaluationFailureDetails $failure): never
+    ```
+- Replaced internal `fail(...)` usage with `failEval(...)` and propagated structured `EvaluationErrorCode`/parameters across compiler failure paths.
+- `ExtractContext::failEval()` now auto-infers `containerType` and `key` parameters when provided.
+- Default evaluation error formatting now uses the failure snapshot.
+- Fixed custom eval failure handlers so they are scoped per extraction call and no longer leak into subsequent calls of the same compiled extractor.
+- Internal `valueStack` is now reset in `prepareForEval()` to avoid stale stack data between extractions.
+- Improved regex validation safety by temporarily overriding error handler
+- Parser now throws a dedicated `SyntaxError` for unterminated quoted string literals (with start position).
+- Refactored recursive traversal (`onEach`) internals to iterate objects through `AccessProxy`.
+- Flatten now correctly processes `Traversable` inputs (instead of returning them unchanged).
+- Flatten now validates preserved keys and fails with a typed evaluation error instead of relying on PHP offset-type failures.
+
 ## [v0.3.0] – 2025-07-06
 [v0.3.0]: https://github.com/nandan108/prop-path/compare/v0.2.2...v0.3.0
 

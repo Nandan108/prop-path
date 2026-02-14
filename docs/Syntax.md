@@ -40,10 +40,10 @@ lineComment  = "//", { character - newline }, newline ;
 ```
 
 Additional notes:
-- **Whitespace**: Space characters (those for which [`ctype_space()`](https://www.php.net/manual/en/function.ctype-space.php) returns true) are simply ignored outside of literals. Although they can be used to separate path segments, using a dot preferred for clarity.
+- **Whitespace**: Space characters (those for which [`ctype_space()`](https://www.php.net/manual/en/function.ctype-space.php) returns true) are simply ignored outside of literals. Although they can be used to separate path segments, using a dot is preferred for clarity.
 - **Quoted strings**: Both single and double-quotes are valid for literal keys: `'my.key'` and `"my.key"` behave identically.
 - **Comments**: C-style line (`// ...`) and block (`/* ... */`) comments are supported and ignored by the parser.
-- **RootChain**: The `rootChain` rule defines the top-level syntax accepted by `PropPath::compile(string $paths)` and `PropPath::extract(string $paths, array $roots)`.
+- **RootChain**: The `rootChain` rule defines the top-level syntax accepted by `PropPath::compile(string|array $paths)` and `PropPath::extract(string|array $paths, array $roots)`.
 If you pass an array instead of a string, it is treated as a structured mode definition.
 
 ---
@@ -206,7 +206,7 @@ Filter container keys or values via regex:
 
 Returns only matching items. Nulls and non-strings/stringable values are skipped.
 
-Note that RexExp segments always preserve keys.
+Note that RegExp segments always preserve keys.
 
 ```php
 // get array of book titles starting with 't' or 'T'
@@ -231,6 +231,7 @@ Useful in recursive traversals, e.g. `books.**.isbn[^0 => ^1.title]`
 ```php
 // Get each book's ISBN mapped to its title
 PropPath::extract('books[*isbn[^ => ^1.title]]@~', $roots);
+```
 
 ---
 

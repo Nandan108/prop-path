@@ -228,6 +228,7 @@ final class TokenStream
             // String literals
             if ('"' === $c || "'" === $c) {
                 $quote = $c;
+                $quotePos = $pos;
                 ++$pos;
                 $start = $pos;
 
@@ -237,6 +238,10 @@ final class TokenStream
                         continue;
                     }
                     ++$pos;
+                }
+
+                if ($pos >= $len) {
+                    throw new SyntaxError("Unterminated string literal starting at position $quotePos");
                 }
 
                 $str = substr($input, $start, $pos - $start);

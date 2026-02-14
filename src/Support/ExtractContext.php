@@ -3,6 +3,7 @@
 namespace Nandan108\PropPath\Support;
 
 use Nandan108\PropPath\Exception\EvaluationError;
+use Nandan108\PropPath\Exception\EvaluationErrorCode;
 use Nandan108\PropPath\Exception\SyntaxError;
 use Nandan108\PropPath\Parser\TokenStream;
 
@@ -11,10 +12,13 @@ use Nandan108\PropPath\Parser\TokenStream;
  */
 final class ExtractContext
 {
+    /** Sentinel used to detect omitted arguments in failEval(). */
+    private const NOT_PROVIDED = '__PROPPATH_NOT_PROVIDED__';
+
     /**
      * The callable to invoke when evaluating a path segment fails.
      *
-     * @var \Closure(string, ExtractContext): never
+     * @var \Closure(string, EvaluationFailureDetails): never
      */
     public \Closure $failWith;
 
@@ -35,6 +39,13 @@ final class ExtractContext
     public array $valueStack = [];
 
     public array $roots;
+
+    /**
+     * Default callable to invoke when evaluating a path segment fails.
+     *
+     * @var \Closure(string, EvaluationFailureDetails): never
+     */
+    private \Closure $defaultFailWith;
 
     /**
      * Constructs a new ExtractContext instance.
@@ -67,29 +78,16 @@ final class ExtractContext
             throw new SyntaxError($msg);
         };
 
-        $this->failWith = function (string $msg, ExtractContext $context): never {
-            throw new EvaluationError($context->getEvalErrorMessage($msg));
+        $this->defaultFailWith = function (string $msg, EvaluationFailureDetails $failure): never {
+            throw new EvaluationError(message: 'Path segment '.$failure->getPropertyPath(true, '``')." $msg.", errorCode: $failure->code, messageParameters: $failure->parameters, propertyPath: $failure->getPropertyPath(), debug: $failure->debug);
         };
-    }
-
-    public function getEvalErrorMessage(string $message): string
-    {
-        $keyStack = array_map(
-            /** @param array{?string, ?ThrowMode} $item */
-            fn (array $item): ?string => $item[0],
-            $this->keyStack,
-        );
-        $keyStack = array_filter($keyStack, fn ($item): bool => null !== $item && '' !== $item);
-        $lastKey = array_pop($keyStack);
-        $keyStackStr = implode('.', $keyStack).($keyStack ? '.' : '')."`$lastKey`";
-
-        return "Path segment $keyStackStr $message.";
+        $this->failWith = $this->defaultFailWith;
     }
 
     /**
      * Prepare the context for evaluation by setting the roots and possibly the failWith closure.
      *
-     * @param ?\Closure(string, ExtractContext): never $failWith
+     * @param ?\Closure(string, EvaluationFailureDetails): never $failWith
      *
      * @throws EvaluationError
      * @throws \InvalidArgumentException
@@ -98,11 +96,10 @@ final class ExtractContext
     {
         // Reset the key and value stacks.
         $this->keyStack = [];
+        $this->valueStack = [];
 
-        // Override the failWith closure if provided.
-        if ($failWith) {
-            $this->failWith = $failWith;
-        }
+        // Custom fail handler is scoped to this extraction call only.
+        $this->failWith = $failWith ?? $this->defaultFailWith;
 
         // Check root validity, then set the roots for the evaluation.
         if (!$roots) {
@@ -155,7 +152,7 @@ final class ExtractContext
      * Get the current mode based on the last key in the stack.
      * If the stack is empty, return the default throw mode.
      */
-    protected function getCurrentMode(): ThrowMode
+    private function getCurrentMode(): ThrowMode
     {
         return $this->keyStack ? end($this->keyStack)[1] : $this->throwMode;
     }
@@ -188,13 +185,48 @@ final class ExtractContext
     }
 
     /**
-     * @phpstan-return never
+     * Fail the evaluation with a given error code and message, along with
+     * contextual information about the failure (like the current path, roots,
+     * key stack, etc.) to help with debugging.
      *
-     * @psalm-return never
+     * @param array<array-key, mixed> $parameters
+     * @param array<array-key, mixed> $debug
+     *
+     * @internal
+     *
+     * @psalm-internal Nandan108\PropPath
+     *
+     * @phpstan-internal Nandan108\PropPath
      */
-    public function fail(string $message): never
-    {
-        ($this->failWith)($message, $this);
+    public function failEval(
+        EvaluationErrorCode $code,
+        string $message,
+        array $parameters = [],
+        array $debug = [],
+        mixed $container = self::NOT_PROVIDED,
+        int|string|\Stringable|null $key = self::NOT_PROVIDED,
+    ): never {
+        if (self::NOT_PROVIDED !== $container && !array_key_exists('containerType', $parameters)) {
+            $parameters['containerType'] = get_debug_type($container);
+        }
+
+        if (self::NOT_PROVIDED !== $key && !array_key_exists('key', $parameters)) {
+            $parameters['key'] = $key;
+        }
+
+        $failure = new EvaluationFailureDetails(
+            code: $code,
+            parameters: $parameters + ['errorCode' => $code->value],
+            debug: $debug,
+            paths: $this->paths,
+            startingThrowMode: $this->throwMode,
+            currentMode: $this->currentMode(),
+            roots: $this->roots,
+            keyStack: $this->keyStack,
+            valueStack: $this->valueStack,
+        );
+
+        ($this->failWith)($message, $failure);
     }
 
     public function failParse(TokenStream $ts, string $message, int $additional = 0): never

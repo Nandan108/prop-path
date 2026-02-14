@@ -83,9 +83,13 @@ PropPath::extract('$dto.user["homeCity" => addresses.home.city]', $data);
 // ['homeCity' => 'Geneva']
 
 PropPath::extract('user[
+    // extract map of zip codes by city name from addresses
     "zips"  => addresses[*[city => zip]]@~,
+    // get value of first "phone" field anywhere in structure,
+    // (default to "no phone")
     "phone" => [**phone ?? "no phone"],
     "fax"   => [**fax ?? "no fax"],
+    // grab "search" => request.search from $context (not default root)
     $context.request.@search
 ]', $data);
 // $result === [
@@ -165,6 +169,40 @@ PropPath::compile(string|array $paths, ...): \Closure
 PropPath::extract(string|array $paths, array $roots, ...): mixed
 PropPath::clearCache(): void
 PropPath::boot(): void
+```
+
+### Evaluation Failures
+
+`PropPath::compile()` returns an extractor with this shape:
+
+```php
+fn (array $roots, ?Closure $failEvalWith = null): mixed
+```
+
+Custom evaluation handlers receive a failure snapshot as second argument:
+
+```php
+use Nandan108\PropPath\Support\EvaluationFailureDetails;
+
+$extractor = PropPath::compile('!user.email');
+
+$value = $extractor($roots, function (string $message, EvaluationFailureDetails $failure): never {
+    // Example: machine-readable code + normalized path
+    throw new RuntimeException($failure->code->value.' at '.$failure->getPropertyPath());
+});
+```
+
+When using the default handler, `EvaluationError` exposes machine-readable fields:
+
+```php
+try {
+    PropPath::extract('!missing', ['value' => []]);
+} catch (\Nandan108\PropPath\Exception\EvaluationError $e) {
+    $code = $e->getErrorCode();               // EvaluationErrorCode enum
+    $params = $e->getMessageParameters();     // includes "errorCode", often "key"/"containerType"
+    $path = $e->getPropertyPath();            // e.g. "$value.missing"
+    $debug = $e->getDebugInfoMap();
+}
 ```
 
 ---

@@ -4,9 +4,11 @@ namespace Tests\Integration;
 
 use Nandan108\PropAccess\PropAccess;
 use Nandan108\PropPath\Exception\EvaluationError;
+use Nandan108\PropPath\Exception\EvaluationErrorCode;
 use Nandan108\PropPath\Exception\SyntaxError;
 use Nandan108\PropPath\Parser\TokenStream;
 use Nandan108\PropPath\PropPath;
+use Nandan108\PropPath\Support\EvaluationFailureDetails;
 use Nandan108\PropPath\Support\ExtractContext;
 use Nandan108\PropPath\Support\ThrowMode;
 use Nandan108\PropPath\Support\TokenType;
@@ -131,7 +133,7 @@ final class PropPathIntegrationTest extends TestCase
     /**
      * Extracts a value from $this->roots using the given path.
      *
-     * @param ?\Closure(string, ExtractContext): never $failWith
+     * @param ?\Closure(string, EvaluationFailureDetails): never $failWith
      */
     private function extract(array|string $path, ?callable $failWith = null, ThrowMode $throwMode = ThrowMode::NEVER): mixed
     {
@@ -872,7 +874,7 @@ final class PropPathIntegrationTest extends TestCase
         $this->assertThrows(
             fn (): mixed => $this->extract('barr.!-2:3'),
             EvaluationError::class,
-            'Path segment $value.`barr` cannot be sliced with negative start: ArrayAccess@anonymous is not countable.'
+            'Path segment $value.`barr` cannot be sliced by `!-2:3` with negative start: ArrayAccess@anonymous is not countable.'
         );
     }
 
@@ -955,9 +957,62 @@ final class PropPathIntegrationTest extends TestCase
 
         // Two bangs (!!~) means throw if the value is not a container or if the result is null.
         // $dto.quux[0] is an array but only contains scalar values, so it should throw.
-        $this->expectException(EvaluationError::class);
-        $this->expectExceptionMessage('Path segment $dto.`isEmpty` flattened by `!!~` is empty.');
-        $this->extract('$dto.isEmpty.!!~');
+        try {
+            $this->extract('$dto.isEmpty.!!~');
+            $this->fail('Expected EvaluationError not thrown');
+        } catch (EvaluationError $e) {
+            // The error message should indicate that the value is empty after flattening, not that it was not a container.
+            $this->assertStringContainsString('Path segment $dto.`isEmpty` flattened by `!!~` is empty.', $e->getMessage());
+        }
+    }
+
+    public function testFlattenFailsOnInvalidKeyTypeWhenPreservingKeys(): void
+    {
+        /** @psalm-suppress MixedArrayAssignment */
+        $this->roots['value']['badIter'] = new
+        /** @implements \Iterator<mixed> */
+        class implements \Iterator {
+            private int $i = 0;
+
+            #[\Override]
+            public function current(): mixed
+            {
+                return 123;
+            }
+
+            #[\Override]
+            public function key(): mixed
+            {
+                return (object) ['bad' => 'key'];
+            }
+
+            #[\Override]
+            public function next(): void
+            {
+                ++$this->i;
+            }
+
+            #[\Override]
+            public function rewind(): void
+            {
+                $this->i = 0;
+            }
+
+            #[\Override]
+            public function valid(): bool
+            {
+                return 0 === $this->i;
+            }
+        };
+
+        try {
+            $this->extract('badIter@~');
+            $this->fail('Expected EvaluationError not thrown');
+        } catch (EvaluationError $e) {
+            $this->assertSame(EvaluationErrorCode::INVALID_KEY_TYPE, $e->getErrorCode());
+            $this->assertSame('proppath.eval.invalid_key_type', $e->getMessageParameters()['errorCode'] ?? null);
+            $this->assertStringContainsString('invalid key type', $e->getMessage());
+        }
     }
 
     public function testParserFailsOnMultipleAtFlagsInSinglePath(): void
@@ -1027,6 +1082,15 @@ final class PropPathIntegrationTest extends TestCase
         );
     }
 
+    public function testUnterminatedStringLiteral(): void
+    {
+        $this->assertThrows(
+            fn (): mixed => $this->extract('foo."bar'),
+            SyntaxError::class,
+            'Unterminated string literal starting at position 4'
+        );
+    }
+
     public function testCompilerThrowsOnInvalidPathTypeInStructuredMode(): void
     {
         $this->assertThrows(
@@ -1078,6 +1142,7 @@ final class PropPathIntegrationTest extends TestCase
             fn (): mixed => $this->extract('bar./(/'),
             SyntaxError::class,
             'Invalid regular expression: /(/ - preg_match(): Compilation failed: missing closing parenthesis at offset 1'
+            // 'Invalid regular expression: /(/ - Invalid regular expression: /(/ - Internal error'
         );
 
         // preg_match() returns false when parsing '/[/'
@@ -1153,8 +1218,9 @@ final class PropPathIntegrationTest extends TestCase
         /** @psalm-suppress InternalClass, InternalMethod */
         $context = new ExtractContext(paths: 'foo.!bar');
 
-        $failWith = function (string $message, ExtractContext $context): never {
-            $context->roots['checked'] = true;
+        $receivedFailure = null;
+        $failWith = function (string $message, EvaluationFailureDetails $failure) use (&$receivedFailure): never {
+            $receivedFailure = $failure;
             throw new EvaluationError('Custom fail: '.$message);
         };
 
@@ -1163,13 +1229,60 @@ final class PropPathIntegrationTest extends TestCase
 
         try {
             /** @psalm-suppress InternalMethod */
-            $context->fail('test');
+            $context->push('$foo');
+            /** @psalm-suppress InternalMethod */
+            $context->push('bar', value: 1);
+            /** @psalm-suppress InternalMethod */
+            $context->failEval(EvaluationErrorCode::UNKNOWN, 'test');
             // If we reach this point, the fail() did not throw as expected
             /** @psalm-suppress UnevaluatedCode */
             $this->fail('fail() did not throw');
         } catch (EvaluationError $e) {
             $this->assertStringContainsString('Custom fail: test', $e->getMessage());
-            $this->assertTrue($context->roots['checked']);
+            $this->assertInstanceOf(EvaluationFailureDetails::class, $receivedFailure);
+            $this->assertSame(['foo' => ['a' => 1]], $receivedFailure->roots);
+            $this->assertSame('$foo.bar', $receivedFailure->getPropertyPath());
+            $this->assertSame('$foo.`bar`', $receivedFailure->getPropertyPath(backtickOnLastSegment: true));
+            $this->assertSame('foo.!bar', $receivedFailure->paths);
+            $this->assertSame(ThrowMode::NEVER, $receivedFailure->startingThrowMode);
+            $this->assertSame(ThrowMode::NEVER, $receivedFailure->currentMode);
+            $this->assertCount(2, $receivedFailure->keyStack);
+            $this->assertCount(1, $receivedFailure->valueStack);
+        }
+    }
+
+    public function testCustomFailHandlerDoesNotLeakAcrossExtractorCalls(): void
+    {
+        $extractor = PropPath::compile('!missing', ignoreCache: true);
+
+        try {
+            $extractor($this->roots, function (): never {
+                throw new \RuntimeException('custom eval handler');
+            });
+            $this->fail('Expected RuntimeException not thrown');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('custom eval handler', $e->getMessage());
+        }
+
+        $this->assertThrows(
+            fn (): mixed => $extractor($this->roots),
+            EvaluationError::class,
+            'Path segment $value.`missing` not found in array.'
+        );
+    }
+
+    public function testEvaluationErrorExposesMachineReadableFields(): void
+    {
+        try {
+            $this->extract('!missing');
+            $this->fail('Expected EvaluationError not thrown');
+        } catch (EvaluationError $e) {
+            $this->assertSame('proppath.eval.key.not_found_array', $e->errorCode->value);
+            $this->assertSame($e->errorCode, $e->getErrorCode());
+            $this->assertSame('$value.missing', $e->getPropertyPath());
+            $this->assertSame('missing', $e->getMessageParameters()['key'] ?? null);
+            $this->assertSame('proppath.eval.key.not_found_array', $e->getMessageParameters()['errorCode'] ?? null);
+            $this->assertIsArray($e->getDebugInfoMap());
         }
     }
 }

@@ -2,7 +2,9 @@
 
 namespace Nandan108\PropPath\Compiler;
 
+use Nandan108\PropAccess\AccessProxy;
 use Nandan108\PropAccess\PropAccess;
+use Nandan108\PropPath\Exception\EvaluationErrorCode;
 use Nandan108\PropPath\Parser\Parser;
 use Nandan108\PropPath\Parser\TokenStream;
 use Nandan108\PropPath\Segment as Seg;
@@ -262,23 +264,42 @@ final class Compiler
     private static function compileFlattenSegment(Seg\ParsedFlatten $seg): \Closure
     {
         $getItems = function (mixed $container, array $throwOn, Seg\ParsedFlatten $seg, ExtractContext $context): mixed {
-            $values = null !== $container && !is_array($container)
-                ? (is_array($container) || is_object($container)
-                    ? PropAccess::getValueMap($container, throwOnNotFound: false)
-                    : null)
-                : $container;
+            $values = match (true) {
+                \is_iterable($container)              => $container,
+                \is_object($container)                => PropAccess::getValueMap($container, throwOnNotFound: false),
+                default                               => null,
+            };
 
-            if (null === $values && in_array($seg->mode, $throwOn)) {
-                $context->fail('Expected a container, got: '.get_debug_type($container));
+            if (null === $values && in_array($seg->mode, $throwOn, true)) {
+                $context->failEval(
+                    code: EvaluationErrorCode::CONTAINER_EXPECTED,
+                    message: 'Expected a container, got: '.get_debug_type($container),
+                    parameters: ['segment' => $seg->raw],
+                    container: $container,
+                );
             }
 
             return $values;
         };
 
-        return function (ExtractContext $context, mixed $value) use ($seg, $getItems): mixed {
+        $validateKey = function (mixed $key, ExtractContext $context, iterable $container, Seg\ParsedFlatten $seg): int|string {
+            if (\is_int($key) || \is_string($key)) {
+                return $key;
+            }
+
+            $context->failEval(
+                code: EvaluationErrorCode::INVALID_KEY_TYPE,
+                message: "flattened by `$seg->raw` yielded invalid key type `".get_debug_type($key).'`',
+                parameters: ['segment' => $seg->raw],
+                debug: ['key' => $key],
+                container: $container,
+            );
+        };
+
+        return function (ExtractContext $context, mixed $value) use ($seg, $getItems, $validateKey): mixed {
             $items = $getItems($value, [ThrowMode::MISSING_KEY, ThrowMode::NULL_VALUE], $seg, $context);
 
-            if (!is_array($items)) {
+            if (null === $items) {
                 // No need to throw an "Expected a container" error, it would already
                 // be thrown by $getItems if the mode is not ThrowMode::NEVER.
                 return $items;
@@ -287,16 +308,17 @@ final class Compiler
             /** @var array<string|int, mixed> */
             $flattenedOutput = [];
 
-            /** @var mixed $outerItem */
+            /** @psalm-suppress MixedAssignment */
             foreach ($items as $outerKey => $outerItem) {
                 // Merge items
                 $subItems = $getItems($outerItem, [], $seg, $context)
-                    ?? [$outerKey => $outerItem];
+                    ?? ($seg->preserveKeys
+                        ? [$validateKey($outerKey, $context, $items, $seg) => $outerItem]
+                        : [$outerItem]);
 
-                /** @var mixed $innerItem */
                 foreach ($subItems as $innerKey => $innerItem) {
                     if ($seg->preserveKeys) {
-                        /** @psalm-var mixed */
+                        $innerKey = $validateKey($innerKey, $context, $subItems, $seg);
                         $flattenedOutput[$innerKey] = $innerItem;
                     } else {
                         /** @psalm-var mixed */
@@ -306,7 +328,13 @@ final class Compiler
             }
 
             if (ThrowMode::NULL_VALUE === $seg->mode) {
-                $flattenedOutput or $context->fail("flattened by `$seg->raw` is empty");
+                $flattenedOutput || $context->failEval(
+                    code: EvaluationErrorCode::FLATTEN_EMPTY,
+                    message: "flattened by `$seg->raw` is empty",
+                    parameters: [
+                        'segment' => $seg->raw,
+                    ],
+                );
             }
 
             $context->push($seg->raw);
@@ -342,17 +370,30 @@ final class Compiler
             // If $originalContainer is not an array or object, $container will be null.
             // We could also have empty containers, in which there's nothing to filter.
             // this according to the ThrowMode.
-            $errorMsg = match ($container) {
-                null    => 'can\'t filter within '.get_debug_type($originalContainer),
-                []      => 'requires keys to filter, but '.get_debug_type($originalContainer).' is empty',
+            $error = match ($container) {
+                null    => [
+                    'code'    => EvaluationErrorCode::REGEXP_INVALID_SUBJECT,
+                    'message' => 'can\'t filter within '.get_debug_type($originalContainer),
+                ],
+                []      => [
+                    'code'    => EvaluationErrorCode::REGEXP_EMPTY_SUBJECT,
+                    'message' => 'requires keys to filter, but '.get_debug_type($originalContainer).' is empty',
+                ],
                 default => null,
             };
-            if ($errorMsg) {
+            if ($error) {
                 $context->push($seg->raw);
 
                 return ThrowMode::NEVER === $mode
                     ? $container
-                    : $context->fail($errorMsg);
+                    : $context->failEval(
+                        code: $error['code'],
+                        message: $error['message'],
+                        parameters: [
+                            'segment' => $seg->raw,
+                        ],
+                        container: $originalContainer,
+                    );
             }
             /** @var non-empty-array $container */
 
@@ -387,7 +428,15 @@ final class Compiler
             // If the output is empty and mode is NULL_VALUE, we throw an error
             if (!$output && ThrowMode::NULL_VALUE === $mode) {
                 $context->push($seg->raw);
-                $context->fail('RegExp failed to match any '.($seg->filterKeys ? 'key' : 'value').' in '.get_debug_type($originalContainer));
+                $context->failEval(
+                    code: EvaluationErrorCode::REGEXP_NO_MATCH,
+                    message: 'RegExp failed to match any '.($seg->filterKeys ? 'key' : 'value').' in '.get_debug_type($originalContainer),
+                    parameters: [
+                        'segment'      => $seg->raw,
+                        'filterByKeys' => $seg->filterKeys,
+                    ],
+                    container: $originalContainer,
+                );
             }
 
             // If we got a getter map from PropAccess, we resolve the values now.
@@ -413,12 +462,19 @@ final class Compiler
             if (null === $container || is_scalar($container)) {
                 if (ThrowMode::NEVER === $context->currentMode()) {
                     return null;
-                } else {
-                    $context->fail(sprintf('of type %s cannot be iterated over by `%s`',
-                        get_debug_type($container),
-                        $seg->raw)
-                    );
                 }
+                $context->failEval(
+                    code: EvaluationErrorCode::ONEACH_NON_ITERABLE,
+                    message: sprintf(
+                        'of type %s cannot be iterated over by `%s`',
+                        get_debug_type($container),
+                        $seg->raw
+                    ),
+                    parameters: [
+                        'segment' => $seg->raw,
+                    ],
+                    container: $container,
+                );
             }
 
             $context->push($seg->raw);
@@ -432,7 +488,13 @@ final class Compiler
 
             if (ThrowMode::NEVER !== $context->currentMode() && empty($results)) {
                 // If the mode is NULL_VALUE, we throw an error if the output is empty
-                $context->fail('onEach segment is empty');
+                $context->failEval(
+                    code: EvaluationErrorCode::ONEACH_EMPTY,
+                    message: 'onEach segment is empty',
+                    parameters: [
+                        'segment' => $seg->raw,
+                    ],
+                );
             }
 
             $output = [];
@@ -464,7 +526,13 @@ final class Compiler
 
             if (ThrowMode::NULL_VALUE === $context->currentMode() && empty($output)) {
                 // If the mode is NULL_VALUE, we throw an error if the output is empty
-                $context->fail('onEach segment returned no results');
+                $context->failEval(
+                    code: EvaluationErrorCode::ONEACH_NO_RESULTS,
+                    message: 'onEach segment returned no results',
+                    parameters: [
+                        'segment' => $seg->raw,
+                    ],
+                );
             }
 
             return $output;
@@ -493,38 +561,26 @@ final class Compiler
             $context->push((string) $currentKey);
         }
 
-        // TODO: dedupe code by use of AccessorProxy
-        if (is_array($node) || $node instanceof \Traversable) {
+        $container = match (true) {
+            is_array($node)               => $node,
+            $node instanceof \Traversable => $node,
+            is_object($node)              => AccessProxy::getFor($node),
+            default                       => null,
+        };
+
+        /** @var ?\Traversable<array-key, mixed> $container */
+        if ($container) {
             /** @var mixed $v */
-            foreach ($node as $k => $v) {
-                if (null === $v) {
-                    continue;
-                }
-                if ($preserveKey) {
-                    $results[] = [$k, $v];
-                } else {
-                    $results[] = [null, $v]; // Add current value
-                }
-                if ($depth) { // Continue recursing if depth not exhausted
-                    self::walkRecursive($v, $results, $depth - 1, $preserveKey, $context, $k);
-                }
-            }
-        } elseif (is_object($node)) {
-            $getterMap = PropAccess::getGetterMap($node);
-            /** @var callable(mixed)[] $getterMap */
-            foreach ($getterMap as $k => $getter) {
-                /** @psalm-var mixed */
-                $v = $getter($node);
-                if (null === $v) {
-                    continue;
-                }
-                if ($preserveKey) {
-                    $results[] = [$k, $v];
-                } else {
-                    $results[] = [null, $v]; // Add current value
-                }
-                if ($depth) {
-                    self::walkRecursive($v, $results, $depth - 1, $preserveKey, $context, $k);
+            foreach ($container as $k => $v) {
+                if (null !== $v) {
+                    if ($preserveKey) {
+                        $results[] = [$k, $v];
+                    } else {
+                        $results[] = [null, $v]; // Add current value
+                    }
+                    if ($depth) { // Continue recursing if depth not exhausted
+                        self::walkRecursive($v, $results, $depth - 1, $preserveKey, $context, $k);
+                    }
                 }
             }
         }
@@ -553,7 +609,15 @@ final class Compiler
             if (!array_key_exists($key, $context->roots)) {
                 /** @var string $jsonRoots */
                 $jsonRoots = json_encode(array_keys($context->roots));
-                $context->fail(": root `$key` not found in roots (valid roots are: ".substr($jsonRoots, 1, -1).')');
+                $context->failEval(
+                    code: EvaluationErrorCode::ROOT_NOT_FOUND,
+                    message: ": root `$key` not found in roots (valid roots are: ".substr($jsonRoots, 1, -1).')',
+                    container: $context->roots,
+                    parameters: [
+                        'validRoots' => array_keys($context->roots),
+                    ],
+                    key: (string) $key,
+                );
             }
 
             // reset stack levels to 0, as we are at the root
@@ -572,7 +636,7 @@ final class Compiler
     private static function compileKeySegment(Seg\ParsedKey $seg, ExtractContext $context): \Closure
     {
         // If we specifying a return type here, intelephense complains: "Not all paths return a value",
-        // despite the presence of a final throw (via $this->fail()). So instead, we don't declare a
+        // despite the presence of a final throw (via $context->failEval()). So instead, we don't declare a
         // return type and suppress psalm's complaint.
         /** @psalm-suppress MissingClosureReturnType */
         return match ($seg->mode ?? $context->currentMode()) {
@@ -582,7 +646,12 @@ final class Compiler
                 if (is_array($container)) {
                     if (!array_key_exists($seg->key, $container)) {
                         // /** @psalm-suppress PossiblyFalseOperand */
-                        $context->fail('not found in array');
+                        $context->failEval(
+                            code: EvaluationErrorCode::KEY_NOT_FOUND_ARRAY,
+                            message: 'not found in array',
+                            container: $container,
+                            key: $seg->key,
+                        );
                     }
 
                     return $container[$seg->key];
@@ -590,7 +659,12 @@ final class Compiler
 
                 if ($container instanceof \ArrayAccess) {
                     if (!$container->offsetExists($seg->key)) {
-                        $context->fail('not found in ArrayAccess');
+                        $context->failEval(
+                            code: EvaluationErrorCode::KEY_NOT_FOUND_ARRAY_ACCESS,
+                            message: 'not found in ArrayAccess',
+                            container: $container,
+                            key: $seg->key,
+                        );
                     }
 
                     return $container[$seg->key];
@@ -599,13 +673,23 @@ final class Compiler
                 if (is_object($container)) {
                     $getter = PropAccess::getGetterMap($container, (string) $seg->key)[$seg->key] ?? null;
                     if (!$getter) {
-                        $context->fail('not accessible on '.get_class($container));
+                        $context->failEval(
+                            code: EvaluationErrorCode::KEY_NOT_ACCESSIBLE_OBJECT,
+                            message: 'not accessible on '.get_class($container),
+                            container: $container,
+                            key: $seg->key,
+                        );
                     }
 
                     return $getter($container);
                 }
 
-                $context->fail('could not be extracted from non-container of type `'.get_debug_type($container).'`');
+                $context->failEval(
+                    code: EvaluationErrorCode::KEY_NON_CONTAINER,
+                    message: 'could not be extracted from non-container of type `'.get_debug_type($container).'`',
+                    container: $container,
+                    key: $seg->key,
+                );
             },
 
             ThrowMode::NULL_VALUE => function (ExtractContext $context, mixed $container) use ($seg) {
@@ -613,7 +697,12 @@ final class Compiler
 
                 if (is_array($container) || $container instanceof \ArrayAccess) {
                     if (!isset($container[$seg->key])) {
-                        $context->fail('is null but required');
+                        $context->failEval(
+                            code: EvaluationErrorCode::NULL_VALUE_REQUIRED,
+                            message: 'is null but required',
+                            container: $container,
+                            key: $seg->key,
+                        );
                     }
 
                     return $container[$seg->key];
@@ -622,12 +711,22 @@ final class Compiler
                 if (is_object($container)) {
                     $getter = PropAccess::getGetterMap($container, [$seg->key], true)[$seg->key] ?? null;
                     if (!$getter) {
-                        $context->fail('not accessible on '.get_class($container));
+                        $context->failEval(
+                            code: EvaluationErrorCode::KEY_NOT_ACCESSIBLE_OBJECT,
+                            message: 'not accessible on '.get_class($container),
+                            container: $container,
+                            key: $seg->key,
+                        );
                     }
                     /** @psalm-var mixed $value */
                     $value = $getter($container);
                     if (null === $value) {
-                        $context->fail('is null but required');
+                        $context->failEval(
+                            code: EvaluationErrorCode::NULL_VALUE_REQUIRED,
+                            message: 'is null but required',
+                            container: $container,
+                            key: $seg->key,
+                        );
                     }
 
                     return $value;
@@ -671,7 +770,7 @@ final class Compiler
 
             $throwMode = $seg->mode ?? $context->currentMode();
 
-            $fail = function (string $message) use ($throwMode, $context, $container): ?array {
+            $fail = function (EvaluationErrorCode $code, string $message, array $parameters = []) use ($throwMode, $context, $container): ?array {
                 if (ThrowMode::NEVER === $throwMode) {
                     /** @psalm-var null */
                     return null; // if mode is NEVER, we just return null
@@ -680,14 +779,25 @@ final class Compiler
                 $message = str_replace('{type}', $type, $message);
 
                 array_pop($context->keyStack);
-                $context->fail($message);
+                $context->failEval(
+                    code: $code,
+                    message: $message,
+                    parameters: $parameters,
+                    container: $container,
+                );
             };
 
             if (null === $container) {
-                return $fail('is null and cannot be sliced');
+                return $fail(
+                    code: EvaluationErrorCode::SLICE_NULL_SUBJECT,
+                    message: 'is null and cannot be sliced'
+                );
             }
             if (!(is_array($container) || $container instanceof \ArrayAccess)) {
-                return $fail('cannot be sliced: {type} is not an array or ArrayAccess');
+                return $fail(
+                    code: EvaluationErrorCode::SLICE_INVALID_SUBJECT,
+                    message: 'cannot be sliced: {type} is not an array or ArrayAccess'
+                );
             }
             $isCountable = is_array($container) || $container instanceof \Countable;
 
@@ -700,20 +810,29 @@ final class Compiler
                 $start = 0;
             } elseif ($start < 0) {
                 if (!$isCountable) {
-                    return $fail('cannot be sliced with negative start: {type} is not countable');
+                    return $fail(
+                        code: EvaluationErrorCode::SLICE_NON_COUNTABLE_START,
+                        message: "cannot be sliced by `$seg->raw` with negative start: {type} is not countable"
+                    );
                 }
                 $start += count($container);
             }
 
             if (null === $end) {
                 if (!$isCountable) {
-                    return $fail("cannot be sliced by `$seg->raw` with null end: {type} is not countable");
+                    return $fail(
+                        code: EvaluationErrorCode::SLICE_NON_COUNTABLE_END,
+                        message: "cannot be sliced by `$seg->raw` with null end: {type} is not countable"
+                    );
                 }
                 /** @psalm-suppress PossiblyInvalidArgument */
                 $end = count($container); // means "slice to the end"
             } elseif ($end < 0) {
                 if (!$isCountable) {
-                    return $fail("cannot be sliced by `$seg->raw` with negative end: {type} is not countable");
+                    return $fail(
+                        code: EvaluationErrorCode::SLICE_NON_COUNTABLE_END,
+                        message: "cannot be sliced by `$seg->raw` with negative end: {type} is not countable"
+                    );
                 }
                 /** @psalm-suppress PossiblyInvalidArgument */
                 $end += count($container);
@@ -746,13 +865,21 @@ final class Compiler
                 if (count($slice) < ($end - $start)) {
                     [$length, $count] = [$end - $start, count($slice)];
 
-                    return $fail("slice `$seg->raw` is missing some keys: expected $length but got $count");
+                    return $fail(
+                        code: EvaluationErrorCode::SLICE_MISSING_KEYS,
+                        message: "slice `$seg->raw` is missing some keys: expected $length but got $count",
+                        parameters: ['expected' => $length, 'actual' => $count],
+                    );
                 }
             } elseif (ThrowMode::NULL_VALUE === $throwMode) {
                 /** @var mixed $v */
                 foreach ($slice as $k => $v) {
                     if (null === $v) {
-                        return $fail("slice `$seg->raw` contains a null value at key `$k`");
+                        return $fail(
+                            code: EvaluationErrorCode::SLICE_CONTAINS_NULL,
+                            message: "slice `$seg->raw` contains a null value at key `$k`",
+                            parameters: ['key' => $k],
+                        );
                     }
                 }
             }
@@ -792,7 +919,11 @@ final class Compiler
                 if (ThrowMode::NEVER === ($seg->mode ?? $context->currentMode())) {
                     return null; // if mode is NEVER, we just return null
                 }
-                $context->fail("is null, therefore `$seg->raw` cannot be applied");
+                $context->failEval(
+                    code: EvaluationErrorCode::BRACKET_ON_NULL,
+                    message: "is null, therefore `$seg->raw` cannot be applied",
+                    parameters: ['segment' => $seg->raw],
+                );
             }
 
             foreach ($compiledBracketParts as $compiledChainExtractor) {
@@ -820,12 +951,9 @@ final class Compiler
 
             $context->push($seg->raw);
 
-            /** @psalm-var mixed */
-            $result = 1 === count($bracket) && !$hasExplicitKey
+            return 1 === count($bracket) && !$hasExplicitKey
                 ? $bracket[0] // if there's only one item in the bracket and preserveKey is false, return it directly
                 : $bracket; // otherwise, return the whole bracket array
-
-            return $result;
         };
     }
 
@@ -845,7 +973,14 @@ final class Compiler
                 if (ThrowMode::NEVER === $mode) {
                     return $context->push(value: null); // if mode is NEVER, we just return null
                 }
-                $context->fail("references index {$seg->index} but the value stack has only ".count($context->valueStack).' items');
+                $context->failEval(
+                    code: EvaluationErrorCode::STACK_REF_OUT_OF_BOUNDS,
+                    message: "references index {$seg->index} but the value stack has only ".count($context->valueStack).' items',
+                    parameters: [
+                        'index'      => $seg->index,
+                        'stackDepth' => count($context->valueStack),
+                    ],
+                );
             }
 
             // Return the value from the stack

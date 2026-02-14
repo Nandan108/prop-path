@@ -5,7 +5,7 @@ namespace Nandan108\PropPath;
 use Nandan108\PropAccess\PropAccess;
 use Nandan108\PropPath\Compiler\Compiler;
 use Nandan108\PropPath\Exception\SyntaxError;
-use Nandan108\PropPath\Support\ExtractContext;
+use Nandan108\PropPath\Support\EvaluationFailureDetails;
 use Nandan108\PropPath\Support\ThrowMode;
 
 /**
@@ -16,7 +16,7 @@ use Nandan108\PropPath\Support\ThrowMode;
  */
 final class PropPath
 {
-    /** @var array<string, \Closure(array, ?\Closure(string, ExtractContext): never=): mixed> */
+    /** @var array<string, \Closure(array, ?\Closure(string, EvaluationFailureDetails): never=): mixed> */
     public static array $cache = [];
 
     public static function boot(): void
@@ -41,7 +41,7 @@ final class PropPath
      * @param string|array                     $paths         a path or array of paths (possibly nested) to compile
      * @param \Closure(string, ?string): never $failParseWith a callable to invoke when path parsing fails (throws a SyntaxError by default)
      *
-     * @return \Closure(array, ?\Closure(string, ExtractContext): never=): mixed
+     * @return \Closure(array, ?\Closure(string, EvaluationFailureDetails): never=): mixed
      *
      * @throws \JsonException in case of invalid JSON encoding of paths
      * @throws SyntaxError    if a syntax  is invalid
@@ -75,8 +75,8 @@ final class PropPath
         // and possibly sets a custom failure handler.
         $extractor =
             /**
-             * @param array<array-key, mixed>                  $roots
-             * @param ?\Closure(string, ExtractContext): never $failEvalWith
+             * @param array<array-key, mixed>                            $roots
+             * @param ?\Closure(string, EvaluationFailureDetails): never $failEvalWith
              **/
             function (array $roots, ?\Closure $failEvalWith = null) use ($innerExtractor, $context): mixed {
                 // Prepare context by setting roots to be used for extraction
