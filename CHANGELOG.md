@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## [v0.4.1] – 2026-02-22
+[v0.4.1]: https://github.com/nandan108/prop-path/compare/v0.4.0...v0.4.1
+
+### Changed
+- Bumped dependency `nandan108/prop-access` from `^0.6.0` to `^0.7.0`.
+
 ## [v0.4.0] – 2026-02-14
 [v0.4.0]: https://github.com/nandan108/prop-path/compare/v0.3.0...v0.4.0
 
